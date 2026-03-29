@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # ===========================================================================
 # models/tweedie.py
 #
@@ -94,7 +95,8 @@ class Tweedie_Fitter(PMT_Fitter):
         spe_bounds=None,
         lam_init=None,
         q_min=None,
-        pad_right=0.1,
+        pad_right=1.0,
+        use_integration=False,
         sample=None,
         seterr: str = "warn",
         fit_total: bool = True,
@@ -116,6 +118,7 @@ class Tweedie_Fitter(PMT_Fitter):
             sample=sample,
             q_min=q_min,
             pad_right=pad_right,
+            use_integration=use_integration,
             init=[ep.init for ep in extra_params] + list(spe_init),
             bounds=[ep.bound for ep in extra_params] + list(spe_bounds),
             constraints=constraints or self._DEFAULT_CONSTRAINTS,
@@ -140,7 +143,7 @@ class Tweedie_Fitter(PMT_Fitter):
         def b_sp(args):
             extra = args[self._extra_slice()]
             padded, _, _ = roll_and_pad(
-                self._pdf_extra(extra), self._shift, self._pad_safe
+                self._pdf_extra(extra), self._i_zero, self._pad_safe
             )
             return fft(padded) * self._xsp_width
 

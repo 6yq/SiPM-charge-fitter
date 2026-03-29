@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import numpy as np
 
 from math import log, exp
@@ -83,6 +84,7 @@ class PMT_Fitter:
         sample=None,
         q_min=None,
         pad_right=1.0,
+        use_integration=False,
         init=None,
         bounds=None,
         constraints=None,
@@ -92,6 +94,7 @@ class PMT_Fitter:
         np.seterr(all=seterr)
         self.seterr = seterr
         self._fit_total = fit_total
+        self._use_integration = use_integration
 
         self.hist = np.asarray(hist, dtype=float)
         self.bins = np.asarray(bins, dtype=float)
@@ -105,9 +108,13 @@ class PMT_Fitter:
             self._lam_init = -log(1.0 - min(occ_est, 1.0 - 1e-9))
 
         occ_est = 1.0 - exp(-self._lam_init)
-        self.sample = (
-            16 * int(1 / (1 - occ_est) ** 0.673313) if sample is None else int(sample)
-        )
+        if not use_integration:
+            # one sub-point per bin: xsp coincides with bin centres
+            self.sample = 1
+        elif sample is not None:
+            self.sample = int(sample)
+        else:
+            self.sample = 16 * int(1 / (1 - occ_est) ** 0.673313)
 
         # subclass sets this to len(extra_params) after super().__init__(),
         # then calls _finalize_init()
@@ -123,7 +130,9 @@ class PMT_Fitter:
 
         self._bin_width = float(self.bins[1] - self.bins[0])
         self._xsp_width = self._bin_width / self.sample
-        _q_min = float(q_min) if q_min is not None else -10000
+        _q_min = float(q_min) if q_min is not None else float(self.bins[0])
+
+        # _shift: number of sub-bins from xsp[0] to bins[0]
         self._shift = int(np.ceil((self.bins[0] - _q_min) / self._xsp_width))
 
         self.xsp = np.linspace(
@@ -133,6 +142,13 @@ class PMT_Fitter:
             endpoint=True,
         )
 
+        # _i_zero: index in xsp where q=0 lives (for FFT origin alignment)
+        # roll by +_i_zero before FFT so q=0 maps to index 0
+        self._i_zero = int(round(-self.xsp[0] / self._xsp_width))
+
+        # after IFFT rolls by -_i_zero, bins[0] is at this index in the result
+        self._bins0_idx = self._shift - self._i_zero
+
         n_origin = len(self.xsp)
         # pad_right extends the grid rightward by pad_right * histogram_width
         # to prevent circular aliasing from heavy tails
@@ -141,7 +157,9 @@ class PMT_Fitter:
         self._pad_safe = _n_target - n_origin
         self._n_full = n_origin + self._pad_safe
         self._freq = 2 * np.pi * np.fft.fftfreq(self._n_full, d=self._xsp_width)
-        self._shift_padded = 2 * self._shift if self._shift < 0 else 0
+        self._shift_padded = (
+            self._i_zero
+        )  # roll by +_i_zero before FFT so q=0 → index 0
         self._recover_slice = slice(0, n_origin)
 
         self._C = self._log_l_C()
@@ -234,7 +252,7 @@ class PMT_Fitter:
             if ft is not None:
                 return ft
             pdf = self._ser_pdf_time(ser_args)
-            padded, _, _ = roll_and_pad(pdf, self._shift, self._pad_safe)
+            padded, _, _ = roll_and_pad(pdf, self._i_zero, self._pad_safe)
             return fft(padded) * self._xsp_width
 
         return ser_to_ft
@@ -282,32 +300,53 @@ class PMT_Fitter:
         return pdf_sr_n
 
     def _make_estimate_counter(self):
-        """Returns a closure estimating bin counts y_est and out-of-window z_est."""
+        """Returns a closure estimating bin counts y_est and out-of-window z_est.
+
+        When use_integration=False, counts are estimated as pdf * bin_width
+        evaluated at bin centres (xsp has sample=1, one point per bin).
+        When use_integration=True, composite Simpson's rule is used.
+        """
         need_mask = self.bins[0] == 0
 
-        # composite-Simpson weights for one bin (sample+1 evaluation points)
-        w = np.ones(self.sample + 1)
-        w[1:-1:2] = 4
-        w[2:-2:2] = 2
-        w *= self._xsp_width / 3
-        self._simp_w = w
+        if self._use_integration:
+            # composite-Simpson weights for one bin (sample+1 evaluation points)
+            w = np.ones(self.sample + 1)
+            w[1:-1:2] = 4
+            w[2:-2:2] = 2
+            w *= self._xsp_width / 3
+            self._simp_w = w
 
-        def counter(args):
-            A_now = self._A_from_args(args)
-            y_sp = A_now * self._pdf_sr(args)
-            if need_mask:
-                y_sp[0] = 0.0
+            def counter(args):
+                A_now = self._A_from_args(args)
+                y_sp = A_now * self._pdf_sr(args)
+                if need_mask:
+                    y_sp[0] = 0.0
+                nbin = len(self.hist)
+                start = self._bins0_idx
+                idx = (
+                    start
+                    + self.sample * np.arange(nbin)[:, None]
+                    + np.arange(self.sample + 1)[None, :]
+                )
+                y_est = np.maximum(y_sp[idx] @ self._simp_w, 1e-32)
+                z_est = max(A_now - float(y_est.sum()), 1e-32)
+                return y_est, z_est
 
-            nbin = len(self.hist)
-            abs_shift = abs(self._shift)
-            idx = (
-                abs_shift
-                + self.sample * np.arange(nbin)[:, None]
-                + np.arange(self.sample + 1)[None, :]
-            )
-            y_est = np.maximum(y_sp[idx] @ self._simp_w, 1e-32)
-            z_est = max(A_now - float(y_est.sum()), 1e-32)
-            return y_est, z_est
+        else:
+            # pdf * bin_width at bin centres (sample=1, xsp[_bins0_idx + i] ≈ centre of bin i)
+            def counter(args):
+                A_now = self._A_from_args(args)
+                y_sp = A_now * self._pdf_sr(args)
+                if need_mask:
+                    y_sp[0] = 0.0
+                nbin = len(self.hist)
+                start = self._bins0_idx
+                # with sample=1, xsp[start + i] is the left edge of bin i;
+                # use midpoint: offset by half a sub-bin
+                idx = start + np.arange(nbin)
+                y_est = np.maximum(y_sp[idx] * self._bin_width, 1e-32)
+                z_est = max(A_now - float(y_est.sum()), 1e-32)
+                return y_est, z_est
 
         return counter
 
@@ -346,21 +385,22 @@ class PMT_Fitter:
         )
 
     def estimate_count_n(self, n):
-        """Expected bin counts for exactly n PE (same length as hist).
-
-        Uses the same Simpson integration as ys, applied to the n-PE PDF.
-        """
+        """Expected bin counts for exactly n PE (same length as hist)."""
         A_now = self._A_from_args(self.full_args)
         y_sp = A_now * self._pdf_sr_n(self.full_args, n)
-
         nbin = len(self.hist)
-        abs_shift = abs(self._shift)
-        idx = (
-            abs_shift
-            + self.sample * np.arange(nbin)[:, None]
-            + np.arange(self.sample + 1)[None, :]
-        )
-        return np.maximum(y_sp[idx] @ self._simp_w, 0.0)
+        start = self._bins0_idx
+
+        if self._use_integration:
+            idx = (
+                start
+                + self.sample * np.arange(nbin)[:, None]
+                + np.arange(self.sample + 1)[None, :]
+            )
+            return np.maximum(y_sp[idx] @ self._simp_w, 0.0)
+        else:
+            idx = start + np.arange(nbin)
+            return np.maximum(y_sp[idx] * self._bin_width, 0.0)
 
     # ==============================
     #     Likelihood

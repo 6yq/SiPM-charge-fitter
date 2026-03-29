@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # ===========================================================================
 # models/generalized_tweedie.py
 #
@@ -75,7 +76,7 @@ class Gen_Tweedie_Fitter(PMT_Fitter):
         Linear constraints on [spe_params..., lam].
     """
 
-    _DEFAULT_SPE_INIT = (1.0, 0.3, 0.05)
+    _DEFAULT_SPE_INIT = (1.0, 0.3, 0.5)
     _DEFAULT_SPE_BOUNDS = ((1e-6, None), (1e-6, None), (1e-6, 0.999))
     _DEFAULT_CONSTRAINTS = [
         {"coeffs": [(1, 1), (2, -1)], "threshold": 0, "op": ">"},
@@ -91,7 +92,8 @@ class Gen_Tweedie_Fitter(PMT_Fitter):
         spe_bounds=None,
         lam_init=None,
         q_min=None,
-        pad_right=0.2,
+        pad_right=3.0,
+        use_integration=False,
         sample=None,
         seterr: str = "warn",
         fit_total: bool = True,
@@ -113,6 +115,7 @@ class Gen_Tweedie_Fitter(PMT_Fitter):
             sample=sample,
             q_min=q_min,
             pad_right=pad_right,
+            use_integration=use_integration,
             init=[ep.init for ep in extra_params] + list(spe_init),
             bounds=[ep.bound for ep in extra_params] + list(spe_bounds),
             constraints=constraints or self._DEFAULT_CONSTRAINTS,
@@ -137,7 +140,7 @@ class Gen_Tweedie_Fitter(PMT_Fitter):
         def b_sp(args):
             extra = args[self._extra_slice()]
             padded, _, _ = roll_and_pad(
-                self._pdf_extra(extra), self._shift, self._pad_safe
+                self._pdf_extra(extra), self._i_zero, self._pad_safe
             )
             return fft(padded) * self._xsp_width
 
