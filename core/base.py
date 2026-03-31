@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import numpy as np
 
 from math import log, exp
@@ -82,7 +81,6 @@ class PMT_Fitter:
         lam_init=None,
         sample=None,
         q_min=None,
-        use_integration=False,
         init=None,
         bounds=None,
         constraints=None,
@@ -92,7 +90,6 @@ class PMT_Fitter:
         np.seterr(all=seterr)
         self.seterr = seterr
         self._fit_total = fit_total
-        self._use_integration = use_integration
 
         self.hist = np.asarray(hist, dtype=float)
         self.bins = np.asarray(bins, dtype=float)
@@ -106,13 +103,12 @@ class PMT_Fitter:
             self._lam_init = -log(1.0 - min(occ_est, 1.0 - 1e-9))
 
         occ_est = 1.0 - exp(-self._lam_init)
-        if not use_integration:
-            # one sub-point per bin: xsp coincides with bin centres
-            self.sample = 1
-        elif sample is not None:
+        if sample is not None:
             self.sample = int(sample)
         else:
             self.sample = 16 * int(1 / (1 - occ_est) ** 0.673313)
+
+        self._use_integration = self.sample == 1
 
         # subclass sets this to len(extra_params) after super().__init__(),
         # then calls _finalize_init()
@@ -301,45 +297,31 @@ class PMT_Fitter:
         """
         need_mask = self.bins[0] == 0
 
-        if self._use_integration:
-            # composite-Simpson weights for one bin (sample+1 evaluation points)
-            w = np.ones(self.sample + 1)
-            w[1:-1:2] = 4
-            w[2:-2:2] = 2
-            w *= self._xsp_width / 3
-            self._simp_w = w
+        # composite-Simpson weights for one bin (sample+1 evaluation points)
+        w = np.ones(self.sample + 1)
+        w[1:-1:2] = 4
+        w[2:-2:2] = 2
+        w *= self._xsp_width / 3
+        # single point correction
+        if not self._use_integration:
+            w *= 3 / 2
+        self._simp_w = w
 
-            def counter(args):
-                A_now = self._A_from_args(args)
-                y_sp = A_now * self._pdf_sr(args)
-                if need_mask:
-                    y_sp[0] = 0.0
-                nbin = len(self.hist)
-                start = self._shift
-                idx = (
-                    start
-                    + self.sample * np.arange(nbin)[:, None]
-                    + np.arange(self.sample + 1)[None, :]
-                )
-                y_est = np.maximum(y_sp[idx] @ self._simp_w, 1e-32)
-                z_est = max(A_now - float(y_est.sum()), 1e-32)
-                return y_est, z_est
-
-        else:
-            # pdf * bin_width at bin centres (sample=1, xsp[_shift + i] ≈ centre of bin i)
-            def counter(args):
-                A_now = self._A_from_args(args)
-                y_sp = A_now * self._pdf_sr(args)
-                if need_mask:
-                    y_sp[0] = 0.0
-                nbin = len(self.hist)
-                start = self._shift
-                # with sample=1, xsp[start + i] is the left edge of bin i;
-                # use midpoint: offset by half a sub-bin
-                idx = start + np.arange(nbin)
-                y_est = np.maximum(y_sp[idx] * self._bin_width, 1e-32)
-                z_est = max(A_now - float(y_est.sum()), 1e-32)
-                return y_est, z_est
+        def counter(args):
+            A_now = self._A_from_args(args)
+            y_sp = A_now * self._pdf_sr(args)
+            if need_mask:
+                y_sp[0] = 0.0
+            nbin = len(self.hist)
+            start = self._shift
+            idx = (
+                start
+                + self.sample * np.arange(nbin)[:, None]
+                + np.arange(self.sample + 1)[None, :]
+            )
+            y_est = np.maximum(y_sp[idx] @ self._simp_w, 1e-32)
+            z_est = max(A_now - float(y_est.sum()), 1e-32)
+            return y_est, z_est
 
         return counter
 
@@ -384,16 +366,12 @@ class PMT_Fitter:
         nbin = len(self.hist)
         start = self._shift
 
-        if self._use_integration:
-            idx = (
-                start
-                + self.sample * np.arange(nbin)[:, None]
-                + np.arange(self.sample + 1)[None, :]
-            )
-            return np.maximum(y_sp[idx] @ self._simp_w, 0.0)
-        else:
-            idx = start + np.arange(nbin)
-            return np.maximum(y_sp[idx] * self._bin_width, 0.0)
+        idx = (
+            start
+            + self.sample * np.arange(nbin)[:, None]
+            + np.arange(self.sample + 1)[None, :]
+        )
+        return np.maximum(y_sp[idx] @ self._simp_w, 0.0)
 
     # ==============================
     #     Likelihood
