@@ -315,7 +315,7 @@ class PMT_Fitter:
                 if need_mask:
                     y_sp[0] = 0.0
                 nbin = len(self.hist)
-                start = self._bins0_idx
+                start = self._shift
                 idx = (
                     start
                     + self.sample * np.arange(nbin)[:, None]
@@ -326,14 +326,14 @@ class PMT_Fitter:
                 return y_est, z_est
 
         else:
-            # pdf * bin_width at bin centres (sample=1, xsp[_bins0_idx + i] ≈ centre of bin i)
+            # pdf * bin_width at bin centres (sample=1, xsp[_shift + i] ≈ centre of bin i)
             def counter(args):
                 A_now = self._A_from_args(args)
                 y_sp = A_now * self._pdf_sr(args)
                 if need_mask:
                     y_sp[0] = 0.0
                 nbin = len(self.hist)
-                start = self._bins0_idx
+                start = self._shift
                 # with sample=1, xsp[start + i] is the left edge of bin i;
                 # use midpoint: offset by half a sub-bin
                 idx = start + np.arange(nbin)
@@ -382,7 +382,7 @@ class PMT_Fitter:
         A_now = self._A_from_args(self.full_args)
         y_sp = A_now * self._pdf_sr_n(self.full_args, n)
         nbin = len(self.hist)
-        start = self._bins0_idx
+        start = self._shift
 
         if self._use_integration:
             idx = (
