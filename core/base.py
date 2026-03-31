@@ -14,7 +14,6 @@ from .utils import (
     modified_neyman_chi2_B,
     mighell_chi2,
 )
-from .fft_utils import roll_and_pad
 
 
 class PMT_Fitter:
@@ -83,7 +82,6 @@ class PMT_Fitter:
         lam_init=None,
         sample=None,
         q_min=None,
-        pad_right=1.0,
         use_integration=False,
         init=None,
         bounds=None,
@@ -98,7 +96,7 @@ class PMT_Fitter:
 
         self.hist = np.asarray(hist, dtype=float)
         self.bins = np.asarray(bins, dtype=float)
-        self.A = int(A) if A is not None else int(self.hist.sum())
+        self.A = int(A)
         self.zero = self.A - int(self.hist.sum())
 
         if lam_init is not None:
@@ -130,13 +128,13 @@ class PMT_Fitter:
 
         self._bin_width = float(self.bins[1] - self.bins[0])
         self._xsp_width = self._bin_width / self.sample
-        _q_min = float(q_min) if q_min is not None else float(self.bins[0])
+        _q_min = float(q_min) if q_min is not None else -10000
 
         # _shift: number of sub-bins from xsp[0] to bins[0]
-        self._shift = int(np.ceil((self.bins[0] - _q_min) / self._xsp_width))
+        self._shift = np.ceil((self.bins[0] - _q_min) / self._xsp_width).astype(int)
 
         self.xsp = np.linspace(
-            self.bins[0] - abs(self._shift) * self._xsp_width,
+            self.bins[0] - self._shift * self._xsp_width,
             self.bins[-1],
             num=len(self.hist) * self.sample + abs(self._shift) + 1,
             endpoint=True,
@@ -150,15 +148,11 @@ class PMT_Fitter:
         self._bins0_idx = self._shift - self._i_zero
 
         n_origin = len(self.xsp)
-        # pad_right extends the grid rightward by pad_right * histogram_width
-        # to prevent circular aliasing from heavy tails
-        _extra = int(pad_right * len(self.hist) * self.sample)
-        _n_target = 2 ** int(np.ceil(np.log2(n_origin + _extra)))
-        self._pad_safe = _n_target - n_origin
-        self._n_full = n_origin + self._pad_safe
+        self._n_full = 2 ** np.ceil(np.log2(n_origin)).astype(int)
+        self._pad_safe = self._n_full - n_origin
         self._freq = 2 * np.pi * np.fft.fftfreq(self._n_full, d=self._xsp_width)
         self._shift_padded = (
-            self._i_zero
+            -self._i_zero
         )  # roll by +_i_zero before FFT so q=0 → index 0
         self._recover_slice = slice(0, n_origin)
 
@@ -252,7 +246,8 @@ class PMT_Fitter:
             if ft is not None:
                 return ft
             pdf = self._ser_pdf_time(ser_args)
-            padded, _, _ = roll_and_pad(pdf, self._i_zero, self._pad_safe)
+            pdf_padded = np.pad(pdf, (0, self._pad_safe), mode="constant")
+            padded = np.roll(pdf_padded, -self._i_zero)
             return fft(padded) * self._xsp_width
 
         return ser_to_ft
@@ -260,9 +255,7 @@ class PMT_Fitter:
     def _make_ifft_pipeline(self):
         def ifft_back(s_processed):
             result = np.real(ifft(s_processed)) / self._xsp_width
-            return np.maximum(
-                np.roll(result, -self._shift_padded)[self._recover_slice], 0.0
-            )
+            return np.maximum(np.roll(result, self._i_zero)[self._recover_slice], 0.0)
 
         return ifft_back
 
