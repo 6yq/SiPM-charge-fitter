@@ -71,6 +71,8 @@ class PMT_Fitter:
         Defaults to bins[0] (no leftward extension) when None.
     fit_total : bool
         Whether to include logA as a free parameter.
+    total_err : float or None
+        Total entry uncertainty.  Defaults to 5%.
     """
 
     def __init__(
@@ -86,10 +88,12 @@ class PMT_Fitter:
         constraints=None,
         seterr: str = "warn",
         fit_total: bool = True,
+        total_err: float = 0.05,
     ):
         np.seterr(all=seterr)
         self.seterr = seterr
         self._fit_total = fit_total
+        self._total_err = total_err
 
         self.hist = np.asarray(hist, dtype=float)
         self.bins = np.asarray(bins, dtype=float)
@@ -171,7 +175,12 @@ class PMT_Fitter:
 
         if self._fit_total:
             init_full = [log(self.A)] + init_full
-            bounds_full = [(None, None)] + bounds_full
+            bounds_full = [
+                (
+                    log(self.A) * (1 - self._total_err), 
+                    log(self.A) * (1 + self._total_err),
+                )
+            ] + bounds_full
 
         self.init = np.array(init_full, dtype=float)
         self.bounds = tuple(bounds_full)

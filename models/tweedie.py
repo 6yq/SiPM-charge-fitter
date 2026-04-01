@@ -96,6 +96,7 @@ class Tweedie_Fitter(PMT_Fitter):
         sample=None,
         seterr: str = "warn",
         fit_total: bool = True,
+        total_err: float = 0.05,
         auto_init: bool = False,
         use_threshold: bool = False,
         constraints=None,
@@ -123,6 +124,7 @@ class Tweedie_Fitter(PMT_Fitter):
             constraints=constraints or self._DEFAULT_CONSTRAINTS,
             seterr=seterr,
             fit_total=fit_total,
+            total_err=total_err,
         )
 
         self._start_idx = len(extra_params)
