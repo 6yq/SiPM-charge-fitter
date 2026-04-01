@@ -514,13 +514,26 @@ class PMT_Fitter:
         self.aic = 2 * self.dof - 2 * self.likelihood
         self.bic = self.dof * np.log(self.A) - 2 * self.likelihood
 
-        for name, v, e in zip(
-            self.extra_param_names(), self.extra_args, self.extra_args_std
+        def _fmt(name, v, e, lo, hi):
+            at = ""
+            if lo is not None and abs(v - lo) < 1e-6 * (abs(lo) or 1):
+                at = "  [AT LOWER BOUND]"
+            elif hi is not None and abs(v - hi) < 1e-6 * (abs(hi) or 1):
+                at = "  [AT UPPER BOUND]"
+            print(f"[RES] {name}: {v:.4g} ± {e:.4g}{at}", flush=True)
+
+        h, s = self._head(), self._start_idx
+        bounds_list = list(self.bounds)
+        for i, (name, v, e) in enumerate(
+            zip(self.extra_param_names(), self.extra_args, self.extra_args_std)
         ):
-            print(f"[RES] {name}: {v:.4g} ± {e:.4g}", flush=True)
+            lo, hi = bounds_list[h + i]
+            _fmt(name, v, e, lo, hi)
         for i, (v, e) in enumerate(zip(self.ser_args, self.ser_args_std)):
-            print(f"[RES] spe[{i}]: {v:.4g} ± {e:.4g}", flush=True)
-        print(f"[RES] lam: {self.lam:.4g} ± {self.lam_std:.4g}", flush=True)
+            lo, hi = bounds_list[h + s + i]
+            _fmt(f"spe[{i}]", v, e, lo, hi)
+        lo, hi = bounds_list[-1]
+        _fmt("lam", self.lam, self.lam_std, lo, hi)
 
     # ==============================
     #     Subclass interface

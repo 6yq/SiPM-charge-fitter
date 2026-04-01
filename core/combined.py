@@ -305,16 +305,30 @@ class CombinedFitter:
         print(f"[INFO] AIC       : {self.aic:.4f}", flush=True)
         print(f"[INFO] BIC       : {self.bic:.4f}", flush=True)
 
+        def _fmt(name, v, e, lo, hi):
+            at = ""
+            if lo is not None and abs(v - lo) < 1e-6 * (abs(lo) or 1):
+                at = "  [AT LOWER BOUND]"
+            elif hi is not None and abs(v - hi) < 1e-6 * (abs(hi) or 1):
+                at = "  [AT UPPER BOUND]"
+            print(f"[INFO] {name}: {v:.4g} ± {e:.4g}{at}", flush=True)
+
+        bounds_list = list(self.bounds)
         if self._start_idx > 0:
             names = self.fitters[0].extra_param_names()
             print("[INFO] Shared pedestal:", flush=True)
-            for name, v, e in zip(names, self.extra_args, self.extra_args_std):
-                print(f"  {name}: {v:.4g} ± {e:.4g}", flush=True)
+            for i, (name, v, e) in enumerate(
+                zip(names, self.extra_args, self.extra_args_std)
+            ):
+                lo, hi = bounds_list[self._extra_slice.start + i]
+                _fmt(f"  {name}", v, e, lo, hi)
 
         print("[INFO] Shared SER:", flush=True)
         for i, (v, e) in enumerate(zip(self.ser_args, self.ser_args_std)):
-            print(f"  spe[{i}]: {v:.4g} ± {e:.4g}", flush=True)
+            lo, hi = bounds_list[self._ser_slice.start + i]
+            _fmt(f"  spe[{i}]", v, e, lo, hi)
 
         print("[INFO] Per-spectrum lam:", flush=True)
         for i, (v, e) in enumerate(zip(self.lams, self.lams_std)):
-            print(f"  spectrum {i}: lam={v:.4g} ± {e:.4g}", flush=True)
+            lo, hi = bounds_list[self._lam_indices[i]]
+            _fmt(f"  spectrum {i}", v, e, lo, hi)
