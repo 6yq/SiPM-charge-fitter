@@ -366,7 +366,17 @@ class PMT_Fitter:
         return np.zeros_like(self.xsp)
 
     def _estimate_smooth(self, args):
-        return self._A_from_args(args) * self._bin_width * self._pdf_sr(args)
+        y_sp = self._A_from_args(args) * self._bin_width * self._pdf_sr(args)
+        if self._use_threshold:
+            from scipy.special import erf
+
+            _SQRT2 = float(np.sqrt(2))
+
+            thres_args = args[self._thres_slice]
+            center, sigma = float(thres_args[0]), float(thres_args[1])
+            eff = 0.5 * (1.0 + erf((self.xsp - center) / (sigma * _SQRT2)))
+            y_sp = y_sp * eff
+        return y_sp
 
     def estimate_smooth_n(self, n):
         """Expected count density for exactly n PE, using fitted full_args."""
