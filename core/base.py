@@ -164,7 +164,7 @@ class PMT_Fitter:
         Must be called by the subclass once _start_idx is final.
         """
         lam_lo = 1e-06
-        lam_hi = 10
+        lam_hi = 1e02
 
         init_full = list(self._init) + [self._lam_init]
         bounds_full = list(self._bounds_in) + [(lam_lo, lam_hi)]
@@ -176,6 +176,12 @@ class PMT_Fitter:
         self.init = np.array(init_full, dtype=float)
         self.bounds = tuple(bounds_full)
         self.dof = len(self.init)
+
+        n_ped = getattr(self, "_n_ped", self._start_idx)
+        n_thres = self._start_idx - n_ped
+        h = 1 if self._fit_total else 0
+        self._thres_slice = slice(h + n_ped, h + n_ped + n_thres)
+        self._use_threshold = getattr(self, "_use_threshold", False)
 
         self._build_pipeline()
 
@@ -295,6 +301,10 @@ class PMT_Fitter:
         evaluated at bin centres (xsp has sample=1, one point per bin).
         When use_integration=True, composite Simpson's rule is used.
         """
+        from scipy.special import erf
+
+        _SQRT2 = float(np.sqrt(2))
+
         need_mask = self.bins[0] == 0
 
         # composite-Simpson weights for one bin (sample+1 evaluation points)
@@ -312,6 +322,13 @@ class PMT_Fitter:
             y_sp = A_now * self._pdf_sr(args)
             if need_mask:
                 y_sp[0] = 0.0
+
+            if self._use_threshold:
+                thres_args = args[self._thres_slice]
+                center, sigma = float(thres_args[0]), float(thres_args[1])
+                eff = 0.5 * (1.0 + erf((self.xsp - center) / (sigma * _SQRT2)))
+                y_sp = y_sp * eff
+
             nbin = len(self.hist)
             start = self._shift
             idx = (

@@ -142,15 +142,14 @@ class ExtraParam(NamedTuple):
 
 
 PEDESTAL_PARAMS: list[ExtraParam] = [
-    ExtraParam("ped_mean", init=0.0, bound=(None, None)),
-    ExtraParam("ped_sigma", init=0.05, bound=(1e-6, None)),
+    ExtraParam("ped_mean", init=-600.0, bound=(-1200.0, 600.0)),
+    ExtraParam("ped_sigma", init=200.0, bound=(1e-6, 1200.0)),
 ]
 
-# Uncomment and append when threshold effect is added:
-# THRESHOLD_PARAMS: list[ExtraParam] = [
-#     ExtraParam("thres_center", init=0.08, bound=(0.0,  None)),
-#     ExtraParam("thres_scale",  init=0.02, bound=(1e-6, None)),
-# ]
+THRESHOLD_PARAMS: list[ExtraParam] = [
+    ExtraParam("thres_center", init=2500, bound=(0.0, 6000.0)),
+    ExtraParam("thres_scale", init=250.0, bound=(1e-6, 2000.0)),
+]
 
 
 # ==============================

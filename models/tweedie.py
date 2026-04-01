@@ -33,7 +33,7 @@ from scipy.fft import fft
 from scipy.stats import norm
 
 from ..core.base import PMT_Fitter
-from ..core.utils import compute_init, ExtraParam, PEDESTAL_PARAMS
+from ..core.utils import compute_init, ExtraParam, PEDESTAL_PARAMS, THRESHOLD_PARAMS
 
 
 # =============================================
@@ -77,8 +77,8 @@ class Tweedie_Fitter(PMT_Fitter):
         Linear constraints on [spe_params..., lam].
     """
 
-    _DEFAULT_SPE_INIT = (1.0, 0.3)
-    _DEFAULT_SPE_BOUNDS = ((1e-6, None), (1e-6, None))
+    _DEFAULT_SPE_INIT = (6000, 500)
+    _DEFAULT_SPE_BOUNDS = ((1e-6, 15000), (1e-6, None))
     _DEFAULT_CONSTRAINTS = [
         {"coeffs": [(1, 1), (2, -1)], "threshold": 0, "op": ">"},
     ]
@@ -97,11 +97,16 @@ class Tweedie_Fitter(PMT_Fitter):
         seterr: str = "warn",
         fit_total: bool = True,
         auto_init: bool = False,
+        use_threshold: bool = False,
         constraints=None,
     ):
         if extra_params is None:
-            extra_params = PEDESTAL_PARAMS
+            extra_params = list(PEDESTAL_PARAMS)
+        if use_threshold:
+            extra_params = list(extra_params) + THRESHOLD_PARAMS
         self._extra_params = extra_params
+        self._use_threshold = use_threshold
+        self._n_ped = len(PEDESTAL_PARAMS)
 
         spe_init = spe_init or self._DEFAULT_SPE_INIT
         spe_bounds = spe_bounds or self._DEFAULT_SPE_BOUNDS
