@@ -108,7 +108,7 @@ class PMT_Fitter:
         else:
             self.sample = 16 * int(1 / (1 - occ_est) ** 0.673313)
 
-        self._use_integration = self.sample == 1
+        self._use_integration = self.sample != 1
 
         # subclass sets this to len(extra_params) after super().__init__(),
         # then calls _finalize_init()
