@@ -296,50 +296,61 @@ class PMT_Fitter:
         return pdf_sr_n
 
     def _make_estimate_counter(self):
-        """Returns a closure estimating bin counts y_est and out-of-window z_est.
-
-        When use_integration=False, counts are estimated as pdf * bin_width
-        evaluated at bin centres (xsp has sample=1, one point per bin).
-        When use_integration=True, composite Simpson's rule is used.
-        """
         from scipy.special import erf
 
         _SQRT2 = float(np.sqrt(2))
-
         need_mask = self.bins[0] == 0
+        start = self._shift
+        nbin = len(self.hist)
 
-        # composite-Simpson weights for one bin (sample+1 evaluation points)
-        w = np.ones(self.sample + 1)
-        w[1:-1:2] = 4
-        w[2:-2:2] = 2
-        w *= self._xsp_width / 3
-        # single point correction
+        def _simp(n):
+            w = np.ones(n + 1)
+            w[1:-1:2] = 4
+            w[2:-2:2] = 2
+            return w * self._xsp_width / 3
+
+        w_bin = _simp(self.sample)
         if not self._use_integration:
-            w *= 3 / 2
-        self._simp_w = w
+            w_bin *= 3 / 2
+        self._simp_w = w_bin
 
-        def counter(args):
-            A_now = self._A_from_args(args)
-            y_sp = A_now * self._pdf_sr(args)
-            if need_mask:
-                y_sp[0] = 0.0
+        w_front = _simp(start)
+        w_tail = _simp(len(self.xsp) - start - 1)
 
-            if self._use_threshold:
+        idx = (
+            start
+            + self.sample * np.arange(nbin)[:, None]
+            + np.arange(self.sample + 1)[None, :]
+        )
+
+        if self._use_threshold:
+
+            def counter(args):
+                A_now = self._A_from_args(args)
+                y_sp_raw = A_now * self._pdf_sr(args)
+                if need_mask:
+                    y_sp_raw[0] = 0.0
                 thres_args = args[self._thres_slice]
                 center, sigma = float(thres_args[0]), float(thres_args[1])
                 eff = 0.5 * (1.0 + erf((self.xsp - center) / (sigma * _SQRT2)))
-                y_sp = y_sp * eff
+                y_sp = y_sp_raw * eff
+                y_est = np.maximum(y_sp[idx] @ self._simp_w, 1e-32)
+                front = float(y_sp[: start + 1] @ w_front)
+                thres_loss = float((y_sp_raw[start:] - y_sp[start:]) @ w_tail)
+                z_est = max(front + thres_loss, 1e-32)
+                return y_est, z_est
 
-            nbin = len(self.hist)
-            start = self._shift
-            idx = (
-                start
-                + self.sample * np.arange(nbin)[:, None]
-                + np.arange(self.sample + 1)[None, :]
-            )
-            y_est = np.maximum(y_sp[idx] @ self._simp_w, 1e-32)
-            z_est = max(A_now - float(y_est.sum()), 1e-32)
-            return y_est, z_est
+        else:
+
+            def counter(args):
+                A_now = self._A_from_args(args)
+                y_sp = A_now * self._pdf_sr(args)
+                if need_mask:
+                    y_sp[0] = 0.0
+                y_est = np.maximum(y_sp[idx] @ self._simp_w, 1e-32)
+                front = float(y_sp[: start + 1] @ w_front)
+                z_est = max(front, 1e-32)
+                return y_est, z_est
 
         return counter
 
