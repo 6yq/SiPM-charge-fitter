@@ -332,3 +332,9 @@ class CombinedFitter:
         for i, (v, e) in enumerate(zip(self.lams, self.lams_std)):
             lo, hi = bounds_list[self._lam_indices[i]]
             _fmt(f"  spectrum {i}", v, e, lo, hi)
+
+        if self._fit_total:
+            print("[INFO] Per-spectrum logA:", flush=True)
+            for i, (v, e) in enumerate(zip(self.logAs, self.logAs_std)):
+                lo, hi = bounds_list[self._logA_indices[i]]
+                _fmt(f"  spectrum {i}", v, e, lo, hi)

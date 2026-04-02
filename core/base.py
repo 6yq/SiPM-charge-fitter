@@ -546,6 +546,12 @@ class PMT_Fitter:
         lo, hi = bounds_list[-1]
         _fmt("lam", self.lam, self.lam_std, lo, hi)
 
+        if self._fit_total:
+            logA = float(full[0])
+            logA_std = float(full_e[0])
+            lo, hi = list(self.bounds)[0]
+            _fmt("logA", logA, logA_std, lo, hi)
+
     # ==============================
     #     Subclass interface
     # ==============================
