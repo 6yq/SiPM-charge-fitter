@@ -148,14 +148,7 @@ class PMT_Fitter:
         self._bins0_idx = self._shift - self._i_zero
 
         n_origin = len(self.xsp)
-        self._n_full = 2 ** np.ceil(np.log2(n_origin)).astype(int)
-        self._pad_safe = self._n_full - n_origin
-        self._freq = 2 * np.pi * np.fft.fftfreq(self._n_full, d=self._xsp_width)
-        self._shift_padded = (
-            -self._i_zero
-        )  # roll by +_i_zero before FFT so q=0 → index 0
-        self._recover_slice = slice(0, n_origin)
-
+        self._freq = 2 * np.pi * np.fft.fftfreq(n_origin, d=self._xsp_width)
         self._C = self._log_l_C()
 
     # =============================================
@@ -177,7 +170,7 @@ class PMT_Fitter:
             init_full = [log(self.A)] + init_full
             bounds_full = [
                 (
-                    log(self.A) * (1 - self._total_err), 
+                    log(self.A) * (1 - self._total_err),
                     log(self.A) * (1 + self._total_err),
                 )
             ] + bounds_full
@@ -257,8 +250,7 @@ class PMT_Fitter:
             if ft is not None:
                 return ft
             pdf = self._ser_pdf_time(ser_args)
-            pdf_padded = np.pad(pdf, (0, self._pad_safe), mode="constant")
-            padded = np.roll(pdf_padded, -self._i_zero)
+            padded = np.roll(pdf, -self._i_zero)
             return fft(padded) * self._xsp_width
 
         return ser_to_ft
@@ -266,7 +258,7 @@ class PMT_Fitter:
     def _make_ifft_pipeline(self):
         def ifft_back(s_processed):
             result = np.real(ifft(s_processed)) / self._xsp_width
-            return np.maximum(np.roll(result, self._i_zero)[self._recover_slice], 0.0)
+            return np.maximum(np.roll(result, self._i_zero), 0.0)
 
         return ifft_back
 

@@ -144,8 +144,7 @@ class Tweedie_Fitter(PMT_Fitter):
         def b_sp(args):
             extra = args[self._extra_slice()]
             pdf = self._pdf_extra(extra)
-            pdf_padded = np.pad(pdf, (0, self._pad_safe), mode="constant")
-            padded = np.roll(pdf_padded, -self._i_zero)
+            padded = np.roll(pdf, -self._i_zero)
             return fft(padded) * self._xsp_width
 
         return b_sp
