@@ -1,601 +1,300 @@
+# ===========================================================================
+# core/base.py
+#
+# Bundles for one spectrum:
+#   - static FFT grid,
+#   - JAX-jitted extended-Poisson log-likelihood (analytic Fourier bin
+#     integration, no sub-sampling),
+#   - fast MLE via L-BFGS-B on JAX gradients,
+#   - per-n-PE component accessor,
+#   - Hessian-based 1-sigma errors.
+#
+# Subclasses provide the model-specific callables and parameter blocks.
+# Flat parameter layout consumed by the optimiser:
+#
+#     theta = [log_A, *extra, *spe, lam]
+# ===========================================================================
+
+from __future__ import annotations
+
 import numpy as np
+import jax
+import jax.numpy as jnp
 
-from math import log, exp
-from scipy.fft import fft, ifft
-from scipy.stats import norm
+from dataclasses import dataclass, field
+from math import log
+from scipy.optimize import minimize
 
-from .utils import (
-    composite_simpson,
-    isParamsInBound,
-    isParamsWithinConstraints,
-    merged_pearson_chi2,
-    modified_neyman_chi2_A,
-    modified_neyman_chi2_B,
-    mighell_chi2,
-)
+from .fft_grid import build_grid, FFTGrid
+from .likelihood import make_binned_logl, _spectrum_fft, _bin_integrals, density_on_xsp
 
 
-class PMT_Fitter:
-    """FFT-based PMT charge spectrum fitter (base class).
+# ==============================
+#     Parameter block spec
+# ==============================
 
-    The full observed charge density is::
 
-        G(q) = sum_k  p_k * h_k(q),   h_k = g0 * f^{*k}
+@dataclass
+class ParamBlock:
+    name: str
+    names: list
+    init: np.ndarray
+    bounds: list
 
-    where g0 is the pedestal (0PE response) and f is the SPE response.
-    The pedestal is always convolved into every k-PE component, so it always
-    contributes to the observable spectrum over the histogram window.
 
-    The light intensity lam = -log(1 - occ) is the primary fit parameter
-    for the count distribution.  It is unbounded above, making it suitable
-    for high-occupancy regimes.
+# ==============================
+#     Fit result container
+# ==============================
 
-    Events outside the histogram window are counted as
-        self.zero = A - sum(hist)
-    and their expected number is estimated as
-        z_est = A_now - sum(y_est).
 
-    Parameter vector layout (flat, as seen by the optimiser)::
+@dataclass
+class FitResult:
+    converged: bool
+    theta: np.ndarray
+    theta_err: np.ndarray
+    logl: float
+    n_iter: int
+    message: str
+    layout: dict = field(default_factory=dict)
 
-        [logA,  extra_0..extra_{S-1},  spe_0..spe_{M-1},  lam]
+    def block(self, name):
+        sl = self.layout[name]
+        return self.theta[sl], self.theta_err[sl]
 
-    S = _start_idx is set by the subclass after calling super().__init__(),
-    which must then call _finalize_init() to assemble vectors and build the
-    pipeline.
 
-    Parameters
-    ----------
-    hist : array-like
-        Bin counts.  Must NOT include events outside the window; those enter
-        via self.zero = A - sum(hist).
-    bins : array-like
-        Bin edges, length len(hist)+1.
-    A : int or None
-        Total events including those outside the histogram window.
-        Defaults to sum(hist) when None.
-    lam_init : float or None
-        Initial light intensity lam = -log(1 - occ).  Inferred from A and
-        hist when None.
-    sample : int or None
-        Sub-sampling factor per bin for the FFT grid.
-    init : array-like
-        Initial values for [extra_params..., spe_params...].
-        logA and lam are appended automatically inside _finalize_init().
-    bounds : list of (lo, hi)
-        Bounds matching init.  logA and lam bounds are appended automatically.
-    constraints : list of dict or None
-        Linear constraints on [spe_params..., lam].
-    q_min : float or None
-        Left edge of the FFT grid.  Pass charges.min() so xsp extends far
-        enough left to cover the pedestal when ped_mean < bins[0].
-        Defaults to bins[0] (no leftward extension) when None.
-    fit_total : bool
-        Whether to include logA as a free parameter.
-    total_err : float or None
-        Total entry uncertainty.  Defaults to 5%.
-    """
+# ==============================
+#     SpectrumFitter
+# ==============================
+
+
+class SpectrumFitter:
+    """Binned PMT spectrum fitter with JAX autodiff + analytic bin integration."""
 
     def __init__(
         self,
         hist,
         bins,
         A=None,
-        lam_init=None,
-        sample=None,
         q_min=None,
-        init=None,
-        bounds=None,
-        constraints=None,
-        seterr: str = "warn",
-        fit_total: bool = True,
-        total_err: float = 0.05,
+        q_max=None,
+        dq=None,
+        extra_block: ParamBlock = None,
+        spe_block: ParamBlock = None,
+        lam_init: float = None,
+        lam_bounds=(1e-6, 1e2),
+        log_A_err: float = 0.05,
     ):
-        np.seterr(all=seterr)
-        self.seterr = seterr
-        self._fit_total = fit_total
-        self._total_err = total_err
+        hist = np.asarray(hist, dtype=float)
+        bins = np.asarray(bins, dtype=float)
+        A = int(A) if A is not None else int(hist.sum())
 
-        self.hist = np.asarray(hist, dtype=float)
-        self.bins = np.asarray(bins, dtype=float)
-        self.A = int(A)
-        self.zero = self.A - int(self.hist.sum())
+        if lam_init is None:
+            occ_est = min(float(hist.sum()) / max(A, 1), 1.0 - 1e-9)
+            lam_init = -log(1.0 - occ_est)
 
-        if lam_init is not None:
-            self._lam_init = float(lam_init)
-        else:
-            occ_est = float(self.hist.sum()) / self.A
-            self._lam_init = -log(1.0 - min(occ_est, 1.0 - 1e-9))
+        self.grid = build_grid(hist, bins, A=A, q_min=q_min, q_max=q_max, dq=dq)
 
-        occ_est = 1.0 - exp(-self._lam_init)
-        if sample is not None:
-            self.sample = int(sample)
-        else:
-            self.sample = 16 * int(1 / (1 - occ_est) ** 0.673313)
+        self.extra_block = extra_block or self._default_extra_block()
+        self.spe_block = spe_block or self._default_spe_block()
 
-        self._use_integration = self.sample != 1
+        log_A_init = log(A)
+        init_parts = [
+            np.array([log_A_init]),
+            np.asarray(self.extra_block.init, dtype=float),
+            np.asarray(self.spe_block.init, dtype=float),
+            np.array([float(lam_init)]),
+        ]
+        bounds_parts = [
+            [(log_A_init * (1 - log_A_err), log_A_init * (1 + log_A_err))],
+            list(self.extra_block.bounds),
+            list(self.spe_block.bounds),
+            [tuple(lam_bounds)],
+        ]
+        self.init = np.concatenate(init_parts)
+        self.bounds = sum(bounds_parts, [])
 
-        # subclass sets this to len(extra_params) after super().__init__(),
-        # then calls _finalize_init()
-        self._start_idx = 0
-
-        self._init = np.asarray(init, dtype=float)
-        self._bounds_in = list(bounds)
-        self.constraints = constraints or []
-
-        # ==============================
-        #     FFT grid
-        # ==============================
-
-        self._bin_width = float(self.bins[1] - self.bins[0])
-        self._xsp_width = self._bin_width / self.sample
-        _q_min = float(q_min) if q_min is not None else -10000
-
-        # _shift: number of sub-bins from xsp[0] to bins[0]
-        self._shift = np.ceil((self.bins[0] - _q_min) / self._xsp_width).astype(int)
-
-        self.xsp = np.linspace(
-            self.bins[0] - self._shift * self._xsp_width,
-            self.bins[-1],
-            num=len(self.hist) * self.sample + abs(self._shift) + 1,
-            endpoint=True,
-        )
-
-        # _i_zero: index in xsp where q=0 lives (for FFT origin alignment)
-        # roll by +_i_zero before FFT so q=0 maps to index 0
-        self._i_zero = int(round(-self.xsp[0] / self._xsp_width))
-
-        # after IFFT rolls by -_i_zero, bins[0] is at this index in the result
-        self._bins0_idx = self._shift - self._i_zero
-
-        n_origin = len(self.xsp)
-        self._freq = 2 * np.pi * np.fft.fftfreq(n_origin, d=self._xsp_width)
-        self._C = self._log_l_C()
-
-    # =============================================
-    #     Init assembly (called by subclass)
-    # =============================================
-
-    def _finalize_init(self):
-        """Assemble full init/bounds vectors and build the pipeline.
-
-        Must be called by the subclass once _start_idx is final.
-        """
-        lam_lo = 1e-06
-        lam_hi = 1e02
-
-        init_full = list(self._init) + [self._lam_init]
-        bounds_full = list(self._bounds_in) + [(lam_lo, lam_hi)]
-
-        if self._fit_total:
-            init_full = [log(self.A)] + init_full
-            bounds_full = [
-                (
-                    log(self.A) * (1 - self._total_err),
-                    log(self.A) * (1 + self._total_err),
-                )
-            ] + bounds_full
-
-        self.init = np.array(init_full, dtype=float)
-        self.bounds = tuple(bounds_full)
+        n_extra = len(self.extra_block.init)
+        n_spe = len(self.spe_block.init)
+        self.layout = {
+            "log_A": slice(0, 1),
+            "extra": slice(1, 1 + n_extra),
+            "spe": slice(1 + n_extra, 1 + n_extra + n_spe),
+            "lam": slice(1 + n_extra + n_spe, 2 + n_extra + n_spe),
+        }
         self.dof = len(self.init)
+        self.param_names = (
+            ["log_A"]
+            + list(self.extra_block.names)
+            + list(self.spe_block.names)
+            + ["lam"]
+        )
 
-        n_ped = getattr(self, "_n_ped", self._start_idx)
-        n_thres = self._start_idx - n_ped
-        h = 1 if self._fit_total else 0
-        self._thres_slice = slice(h + n_ped, h + n_ped + n_thres)
-        self._use_threshold = getattr(self, "_use_threshold", False)
+        pdf_extra, ser_ft, count_pgf, efficiency = self._model_callables()
+        self._pdf_extra = pdf_extra
+        self._ser_ft = ser_ft
+        self._count_pgf = count_pgf
 
-        self._build_pipeline()
-
-        for v, (lo, hi) in zip(self.init, self.bounds):
-            lo_s = f"{lo:.4g}" if lo is not None else "-inf"
-            hi_s = f"{hi:.4g}" if hi is not None else "+inf"
-            print(f"[INIT] {float(v):.4g}  in  [{lo_s}, {hi_s}]", flush=True)
-
-    # ==============================
-    #     Index helpers
-    # ==============================
-
-    def _head(self):
-        return 1 if self._fit_total else 0
-
-    def _extra_slice(self):
-        h = self._head()
-        return slice(h, h + self._start_idx)
-
-    def _spe_slice(self):
-        h = self._head()
-        return slice(h + self._start_idx, -1)
+        self._logl_raw = make_binned_logl(self.grid, pdf_extra, ser_ft, count_pgf)
+        self._logl_jit = jax.jit(self._logl_from_theta)
+        self._grad_jit = jax.jit(jax.grad(self._logl_from_theta))
 
     # ==============================
-    #     Pipeline assembly
+    #     theta <-> blocks
     # ==============================
 
-    def _build_pipeline(self):
-        """Build all pipeline closures.  Called once _start_idx is final."""
-        self._b_sp = self._make_b_sp()
-        self._all_PE_processor = self._make_all_PE_processor()
-        self._nPE_processor = self._make_nPE_processor()
-        self._ser_to_ft = self._make_ser_to_ft()
-        self._ifft_pipeline = self._make_ifft_pipeline()
-        self._pdf_sr_n = self._make_pdf_sr_n()
-        self._estimate_count = self._make_estimate_counter()
-        self._constraint_check = self._make_constraint_checker()
-
-    # ==============================
-    #     Pipeline factories
-    # ==============================
-
-    def _make_b_sp(self):
-        """FFT of the pedestal PDF.  Subclass overrides when a pedestal is present."""
-        return lambda args: None
-
-    def _make_all_PE_processor(self):
-        """Full G~(w) = g0~(w) * G_N(f~(w)) processor.
-        Subclass must override to implement the count-distribution pgf.
-        """
-        raise NotImplementedError
-
-    def _make_nPE_processor(self):
-        """Returns a closure for the n-PE contribution in Fourier space."""
+    def _unpack(self, theta):
         return (
-            lambda lam, n: lambda s_sp: exp(-lam)
-            * (lam * s_sp) ** n
-            / np.prod(range(1, n + 1))
+            theta[self.layout["log_A"].start],
+            theta[self.layout["extra"]],
+            theta[self.layout["spe"]],
+            theta[self.layout["lam"].start],
         )
 
-    def _make_ser_to_ft(self):
-        def ser_to_ft(ser_args):
-            ft = self._ser_ft(self._freq, ser_args)
-            if ft is not None:
-                return ft
-            pdf = self._ser_pdf_time(ser_args)
-            padded = np.roll(pdf, -self._i_zero)
-            return fft(padded) * self._xsp_width
+    def _logl_from_theta(self, theta):
+        log_A, extra, spe, lam = self._unpack(theta)
+        return self._logl_raw(log_A, extra, spe, lam)
 
-        return ser_to_ft
+    def logl(self, theta):
+        return float(self._logl_jit(jnp.asarray(theta, dtype=jnp.float64)))
 
-    def _make_ifft_pipeline(self):
-        def ifft_back(s_processed):
-            result = np.real(ifft(s_processed)) / self._xsp_width
-            return np.maximum(np.roll(result, self._i_zero), 0.0)
+    # ==============================
+    #     MLE
+    # ==============================
 
-        return ifft_back
+    def fit_mle(self, theta0=None, maxiter=500, verbose=False):
+        if theta0 is None:
+            theta0 = self.init.copy()
+        theta0 = np.asarray(theta0, dtype=np.float64)
 
-    def _make_pdf_sr_n(self):
-        """Returns a closure for the n-PE component of G(q) on xsp."""
-        n_spe = len(self._init) - self._start_idx
+        self._logl_jit(jnp.asarray(theta0))
+        self._grad_jit(jnp.asarray(theta0))
 
-        def pdf_sr_n(args, n):
-            a = np.asarray(args, float)
-            if a.size == len(self.init):
-                # full vector: [logA, extra..., spe..., lam]
-                ser_args = a[self._spe_slice()]
-                lam = float(a[-1])
-                extra = a[self._extra_slice()]
-            elif a.size == n_spe + 1:
-                # short vector: [spe..., lam]
-                ser_args = a[:-1]
-                lam = float(a[-1])
-                extra = np.array([])
-            else:
-                raise ValueError(
-                    f"args length {a.size} invalid; "
-                    f"expected full ({len(self.init)}) or tail ({n_spe + 1})."
-                )
-            if n == 0:
-                return (
-                    self._pdf_extra(extra)
-                    if self._start_idx > 0 and extra.size > 0
-                    else np.zeros_like(self.xsp)
-                )
-            b_sp = self._b_sp(a)
-            ft = self._ser_to_ft(ser_args) + self.const(ser_args)
-            return self._ifft_pipeline(self._nPE_processor(lam, n)(ft) * b_sp)
+        def neg_logl(x):
+            return -float(self._logl_jit(jnp.asarray(x, dtype=jnp.float64)))
 
-        return pdf_sr_n
+        def neg_grad(x):
+            return -np.array(self._grad_jit(jnp.asarray(x, dtype=jnp.float64)))
 
-    def _make_estimate_counter(self):
-        from scipy.special import erf
-
-        _SQRT2 = float(np.sqrt(2))
-        need_mask = self.bins[0] == 0
-        start = self._shift
-        nbin = len(self.hist)
-
-        def _simp(n):
-            w = np.ones(n + 1)
-            w[1:-1:2] = 4
-            w[2:-2:2] = 2
-            return w * self._xsp_width / 3
-
-        w_bin = _simp(self.sample)
-        if not self._use_integration:
-            w_bin *= 3 / 2
-        self._simp_w = w_bin
-
-        w_front = _simp(start)
-        w_tail = _simp(len(self.xsp) - start - 1)
-
-        idx = (
-            start
-            + self.sample * np.arange(nbin)[:, None]
-            + np.arange(self.sample + 1)[None, :]
+        res = minimize(
+            neg_logl,
+            theta0,
+            jac=neg_grad,
+            method="L-BFGS-B",
+            bounds=self.bounds,
+            options={"maxiter": maxiter, "disp": verbose},
         )
 
-        if self._use_threshold:
+        theta_hat = np.asarray(res.x, dtype=np.float64)
+        theta_err = self._hessian_errors(theta_hat)
 
-            def counter(args):
-                A_now = self._A_from_args(args)
-                y_sp_raw = A_now * self._pdf_sr(args)
-                if need_mask:
-                    y_sp_raw[0] = 0.0
-                thres_args = args[self._thres_slice]
-                center, sigma = float(thres_args[0]), float(thres_args[1])
-                eff = 0.5 * (1.0 + erf((self.xsp - center) / (sigma * _SQRT2)))
-                y_sp = y_sp_raw * eff
-                y_est = np.maximum(y_sp[idx] @ self._simp_w, 1e-32)
-                front = float(y_sp[: start + 1] @ w_front)
-                thres_loss = float((y_sp_raw[start:] - y_sp[start:]) @ w_tail)
-                z_est = max(front + thres_loss, 1e-32)
-                return y_est, z_est
-
-        else:
-
-            def counter(args):
-                A_now = self._A_from_args(args)
-                y_sp = A_now * self._pdf_sr(args)
-                if need_mask:
-                    y_sp[0] = 0.0
-                y_est = np.maximum(y_sp[idx] @ self._simp_w, 1e-32)
-                front = float(y_sp[: start + 1] @ w_front)
-                z_est = max(front, 1e-32)
-                return y_est, z_est
-
-        return counter
-
-    def _make_constraint_checker(self):
-        if not self.constraints:
-            return lambda args: True
-        return lambda args: isParamsWithinConstraints(
-            args[self._head() + self._start_idx :], self.constraints
+        return FitResult(
+            converged=bool(res.success),
+            theta=theta_hat,
+            theta_err=theta_err,
+            logl=-float(res.fun),
+            n_iter=int(res.nit),
+            message=str(res.message),
+            layout=self.layout,
         )
 
+    def _hessian_errors(self, theta):
+        try:
+            H = np.asarray(jax.hessian(self._logl_from_theta)(jnp.asarray(theta)))
+            cov = -np.linalg.inv(H)
+            diag = np.diag(cov)
+            diag = np.where(diag > 0, diag, np.nan)
+            return np.sqrt(diag)
+        except Exception:
+            return np.full_like(theta, np.nan)
+
     # ==============================
-    #     PDF evaluation
+    #     Expected counts & density
     # ==============================
 
-    def _pdf_sr(self, args):
-        """Full spectrum PDF G(q) evaluated on xsp."""
-        ser_args = args[self._spe_slice()]
-        lam = float(args[-1])
-        b_sp = self._b_sp(args)
-        ft = self._ser_to_ft(ser_args) + self.const(ser_args)
-        return self._ifft_pipeline(self._all_PE_processor(lam, b_sp)(ft))
-
-    def _pdf_extra(self, extra_args):
-        """Pedestal (0PE) PDF on xsp.  Subclass overrides when a pedestal is present."""
-        return np.zeros_like(self.xsp)
-
-    def _estimate_smooth(self, args):
-        y_sp = self._A_from_args(args) * self._bin_width * self._pdf_sr(args)
-        if self._use_threshold:
-            from scipy.special import erf
-
-            _SQRT2 = float(np.sqrt(2))
-
-            thres_args = args[self._thres_slice]
-            center, sigma = float(thres_args[0]), float(thres_args[1])
-            eff = 0.5 * (1.0 + erf((self.xsp - center) / (sigma * _SQRT2)))
-            y_sp = y_sp * eff
-        return y_sp
-
-    def estimate_smooth_n(self, n):
-        """Expected count density for exactly n PE, using fitted full_args."""
-        return (
-            self._A_from_args(self.full_args)
-            * self._bin_width
-            * self._pdf_sr_n(self.full_args, n)
+    def estimate_bin_counts(self, theta):
+        """Expected counts per bin via analytic Fourier bin integration."""
+        log_A, extra, spe, lam = self._unpack(jnp.asarray(theta))
+        G_tilde = _spectrum_fft(
+            extra,
+            spe,
+            lam,
+            jnp.asarray(self.grid.freq),
+            jnp.asarray(self.grid.xsp),
+            float(self.grid.xsp_width),
+            int(self.grid.i_zero),
+            self._pdf_extra,
+            self._ser_ft,
+            self._count_pgf,
         )
-
-    def estimate_count_n(self, n):
-        """Expected bin counts for exactly n PE (same length as hist)."""
-        A_now = self._A_from_args(self.full_args)
-        y_sp = A_now * self._pdf_sr_n(self.full_args, n)
-        nbin = len(self.hist)
-        start = self._shift
-
-        idx = (
-            start
-            + self.sample * np.arange(nbin)[:, None]
-            + np.arange(self.sample + 1)[None, :]
+        bin_int = _bin_integrals(
+            G_tilde,
+            jnp.asarray(self.grid.bins),
+            jnp.asarray(self.grid.freq),
+            len(self.grid.xsp),
+            float(self.grid.xsp_width),
         )
-        return np.maximum(y_sp[idx] @ self._simp_w, 0.0)
+        return np.asarray(jnp.exp(log_A) * bin_int)
 
-    # ==============================
-    #     Likelihood
-    # ==============================
-
-    def _log_l_C(self):
-        """Factorial constant in the extended Poisson log-likelihood."""
-        n_part = sum(float(np.sum(np.log(np.arange(1, int(n) + 1)))) for n in self.hist)
-        n0_part = float(np.sum(np.log(np.arange(1, int(self.zero) + 1))))
-        return n_part + n0_part
-
-    def log_l(self, args) -> float:
-        if not (isParamsInBound(args, self.bounds) and self._constraint_check(args)):
-            return -np.inf
-        y, z = self._estimate_count(args)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ll = np.sum(self.hist * np.log(y) - y) + self.zero * np.log(z) - z - self._C
-        return float(ll) if np.isfinite(ll) else -np.inf
-
-    def get_chi_sq(self, args, chi_sq_fn, dof):
-        y, z = self._estimate_count(args)
-        return chi_sq_fn(self.hist, y, self.zero, z, dof)
-
-    # ==============================
-    #     Fitting
-    # ==============================
-
-    def fit(self, *, strategy=1, tol=1e-1, max_calls=10000, print_level=0):
-        """Fit with Minuit (pyROOT backend).
-
-        Parameters
-        ----------
-        strategy : int
-            Minuit strategy (0, 1, or 2).
-        tol : float
-            Convergence tolerance.
-        max_calls : int
-            Maximum number of function calls.
-        print_level : int
-            Minuit verbosity.
-        """
-        import ROOT
-
-        ROOT.gErrorIgnoreLevel = ROOT.kError
-
-        def _nll(par_ptr):
-            args = np.array([par_ptr[i] for i in range(self.dof)], dtype=float)
-            ll = self.log_l(args)
-            return 1e30 if not np.isfinite(ll) else -ll
-
-        self._nll = _nll  # keep reference alive for ROOT GC
-        fcn = ROOT.Math.Functor(self._nll, self.dof)
-
-        def _setup(m, this_strat, this_tol):
-            m.SetFunction(fcn)
-            m.SetStrategy(this_strat)
-            m.SetErrorDef(0.5)
-            m.SetTolerance(this_tol)
-            m.SetMaxFunctionCalls(max_calls)
-            m.SetPrintLevel(print_level)
-            for i, (v0, (lo, hi)) in enumerate(zip(self.init, self.bounds)):
-                step = 0.1 * (abs(float(v0)) or 1.0)
-                if lo is None and hi is None:
-                    m.SetVariable(i, f"p{i}", float(v0), step)
-                elif lo is not None and hi is not None:
-                    m.SetLimitedVariable(i, f"p{i}", float(v0), step, lo, hi)
-                elif lo is not None:
-                    m.SetLowerLimitedVariable(i, f"p{i}", float(v0), step, lo)
-                else:
-                    m.SetUpperLimitedVariable(i, f"p{i}", float(v0), step, hi)
-
-        algos = ["Migrad", "Combined", "Migrad", "Combined", "Migrad", "Combined"]
-        for attempt, algo in enumerate(algos):
-            this_tol = tol if attempt < 2 else min(10 * tol, 1.0)
-            this_strat = (3 - strategy) if attempt >= 4 else strategy
-            m = ROOT.Math.Factory.CreateMinimizer("Minuit2", algo)
-            _setup(m, this_strat, this_tol)
-            if m.Minimize():
-                break
-            print(f"[WARN] Minuit attempt {attempt + 1} failed", flush=True)
-        else:
-            print("[WARN] Minuit did not converge after 6 attempts", flush=True)
-
-        m.Hesse()
-        self.converged = m.Status() == 0
-
-        full = np.array([m.X()[i] for i in range(self.dof)])
-        full_e = np.array([m.Errors()[i] for i in range(self.dof)])
-        self._store_results(full, full_e, -m.MinValue())
-
-    # ==============================
-    #     Result storage
-    # ==============================
-
-    def _store_results(self, full, full_e, likelihood):
-        h, s = self._head(), self._start_idx
-        self.full_args = full
-        self.full_args_std = full_e
-        self.extra_args = full[h : h + s]
-        self.extra_args_std = full_e[h : h + s]
-        self.ser_args = full[h + s : -1]
-        self.ser_args_std = full_e[h + s : -1]
-        self.lam = float(full[-1])
-        self.lam_std = float(full_e[-1])
-        self.gps = self.get_gain(self.ser_args, "gp")
-        self.gms = self.get_gain(self.ser_args, "gm")
-
-        self.likelihood = likelihood
-        self.smooth = self._estimate_smooth(full)
-        self.ys, self.zs = self._estimate_count(full)
-
-        self.chi_sq_pearson, self.ndf_merged = self.get_chi_sq(
-            full, merged_pearson_chi2, self.dof
+    def estimate_density(self, theta):
+        """Full density G(q) on the xsp grid (for plotting)."""
+        log_A, extra, spe, lam = self._unpack(jnp.asarray(theta))
+        g = density_on_xsp(
+            extra,
+            spe,
+            lam,
+            jnp.asarray(self.grid.freq),
+            float(self.grid.xsp_width),
+            int(self.grid.i_zero),
+            jnp.asarray(self.grid.xsp),
+            self._pdf_extra,
+            self._ser_ft,
+            self._count_pgf,
         )
-        self.chi_sq_neyman_A, self.ndf = self.get_chi_sq(
-            full, modified_neyman_chi2_A, self.dof
+        return np.asarray(jnp.exp(log_A) * g)
+
+    def estimate_component_counts(self, theta, n):
+        """Expected counts for exactly n PE per bin."""
+        n_pgf = self._single_n_pgf(n)
+        log_A, extra, spe, lam = self._unpack(jnp.asarray(theta))
+        G_tilde = _spectrum_fft(
+            extra,
+            spe,
+            lam,
+            jnp.asarray(self.grid.freq),
+            jnp.asarray(self.grid.xsp),
+            float(self.grid.xsp_width),
+            int(self.grid.i_zero),
+            self._pdf_extra,
+            self._ser_ft,
+            n_pgf,
         )
-        self.chi_sq_neyman_B, _ = self.get_chi_sq(
-            full, modified_neyman_chi2_B, self.dof
+        bin_int = _bin_integrals(
+            G_tilde,
+            jnp.asarray(self.grid.bins),
+            jnp.asarray(self.grid.freq),
+            len(self.grid.xsp),
+            float(self.grid.xsp_width),
         )
-        self.chi_sq_mighell, _ = self.get_chi_sq(full, mighell_chi2, self.dof)
-
-        self.aic = 2 * self.dof - 2 * self.likelihood
-        self.bic = self.dof * np.log(self.A) - 2 * self.likelihood
-
-        def _fmt(name, v, e, lo, hi):
-            at = ""
-            if lo is not None and abs(v - lo) < 1e-6 * (abs(lo) or 1):
-                at = "  [AT LOWER BOUND]"
-            elif hi is not None and abs(v - hi) < 1e-6 * (abs(hi) or 1):
-                at = "  [AT UPPER BOUND]"
-            print(f"[RES] {name}: {v:.4g} ± {e:.4g}{at}", flush=True)
-
-        h, s = self._head(), self._start_idx
-        bounds_list = list(self.bounds)
-        for i, (name, v, e) in enumerate(
-            zip(self.extra_param_names(), self.extra_args, self.extra_args_std)
-        ):
-            lo, hi = bounds_list[h + i]
-            _fmt(name, v, e, lo, hi)
-        for i, (v, e) in enumerate(zip(self.ser_args, self.ser_args_std)):
-            lo, hi = bounds_list[h + s + i]
-            _fmt(f"spe[{i}]", v, e, lo, hi)
-        lo, hi = bounds_list[-1]
-        _fmt("lam", self.lam, self.lam_std, lo, hi)
-
-        if self._fit_total:
-            logA = float(full[0])
-            logA_std = float(full_e[0])
-            lo, hi = list(self.bounds)[0]
-            _fmt("logA", logA, logA_std, lo, hi)
+        return np.asarray(jnp.exp(log_A) * bin_int)
 
     # ==============================
     #     Subclass interface
     # ==============================
 
-    def _ser_ft(self, freq, ser_args):
-        """Analytic SPE characteristic function.  Return None to use FFT fallback."""
-        return None
-
-    def _ser_pdf_time(self, ser_args):
+    def _model_callables(self):
         raise NotImplementedError
 
-    def const(self, ser_args):
-        """Delta-at-zero weight in the SPE (e.g. for models with a δ component)."""
-        return 0
-
-    def get_gain(self, ser_args, gain: str = "gm"):
+    def _default_extra_block(self) -> ParamBlock:
         raise NotImplementedError
 
-    def extra_param_names(self) -> list:
-        """Human-readable names for extra_args, used in result reporting."""
-        return [f"extra[{i}]" for i in range(self._start_idx)]
-
-    def _replace_spe_params(self, mean_init, sigma_init):
+    def _default_spe_block(self) -> ParamBlock:
         raise NotImplementedError
 
-    def _replace_spe_bounds(self, mean_bound, sigma_bound):
+    def _single_n_pgf(self, n):
         raise NotImplementedError
 
-    # ==============================
-    #     Utilities
-    # ==============================
+    def get_gain(self, spe_args, kind="gm"):
+        raise NotImplementedError
 
-    def _A_from_args(self, args):
-        if self._fit_total:
-            return float(np.exp(np.clip(float(args[0]), 0, log(1e12))))
-        return float(self.A)
+    def spe_report(self, spe_args) -> dict:
+        raise NotImplementedError

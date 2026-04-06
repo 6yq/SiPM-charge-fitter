@@ -1,4 +1,3 @@
-from .tweedie import Tweedie_Fitter
-from .generalized_tweedie import Gen_Tweedie_Fitter
+from .gen_tweedie import GenTweedieFitter, spe_from_reparam, reparam_from_spe
 
-__all__ = [...]
+__all__ = ["GenTweedieFitter", "spe_from_reparam", "reparam_from_spe"]
