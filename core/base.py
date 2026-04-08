@@ -26,7 +26,13 @@ from math import log
 from scipy.optimize import minimize
 
 from .fft_grid import build_grid, FFTGrid
-from .likelihood import make_binned_logl, _spectrum_fft, _bin_integrals, density_on_xsp
+from .likelihood import (
+    make_binned_logl,
+    make_unbinned_logl,
+    _spectrum_fft,
+    _bin_integrals,
+    density_on_xsp,
+)
 
 
 # ==============================
@@ -83,6 +89,8 @@ class SpectrumFitter:
         lam_init: float = None,
         lam_bounds=(1e-6, 1e2),
         log_A_err: float = 0.05,
+        mode: str = "unbinned",
+        Q_raw=None,
     ):
         hist = np.asarray(hist, dtype=float)
         bins = np.asarray(bins, dtype=float)
@@ -134,7 +142,16 @@ class SpectrumFitter:
         self._ser_ft = ser_ft
         self._count_pgf = count_pgf
 
-        self._logl_raw = make_binned_logl(self.grid, pdf_extra, ser_ft, count_pgf)
+        if mode == "unbinned":
+            if Q_raw is None:
+                raise ValueError("mode='unbinned' requires Q_raw.")
+            self._logl_raw = make_unbinned_logl(
+                jnp.asarray(Q_raw), self.grid, pdf_extra, ser_ft, count_pgf
+            )
+        else:
+            self._logl_raw = make_binned_logl(self.grid, pdf_extra, ser_ft, count_pgf)
+        self._mode = mode
+        
         self._logl_jit = jax.jit(self._logl_from_theta)
         self._grad_jit = jax.jit(jax.grad(self._logl_from_theta))
 

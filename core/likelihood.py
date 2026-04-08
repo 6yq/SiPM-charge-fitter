@@ -151,6 +151,82 @@ def make_binned_logl(grid, pdf_extra, ser_ft, count_pgf, efficiency=None):
 
 
 # ==============================
+#     Unbinned log-likelihood
+# ==============================
+
+
+def _density_at_q(G_tilde, Q_raw, N, dq):
+    """Evaluate G(q) at arbitrary positions via type-2 NUFFT.
+
+    G(q) = (1/L) * sum_n G~_n * exp(+i w_n q),  w_n = 2pi/L * n.
+    jax_finufft nufft2 expects modes in fftshift order and x in [-pi, pi].
+    """
+    import jax_finufft
+
+    L = N * dq
+    x = (2.0 * jnp.pi / L) * Q_raw.astype(jnp.float32)
+    vals = jax_finufft.nufft2(
+        jnp.fft.fftshift(G_tilde).astype(jnp.complex64), x, iflag=1
+    )
+    return jnp.maximum(jnp.real(vals) / L, 1e-32)
+
+
+def make_unbinned_logl(Q_raw, grid, pdf_extra, ser_ft, count_pgf):
+    """Build an unbinned extended-Poisson log-likelihood closure.
+
+    G(q) is evaluated at each raw charge value via NUFFT (type-2:
+    uniform Fourier coefficients -> non-uniform points), so no binning
+    is needed for the shape term.
+
+    Extended log-L:
+        log L = N_obs*log(A) + sum_i log G(Q_i) - A * Re(G~_0)
+
+    where Re(G~_0) = integral G dq ~ 1 when the grid covers the support.
+
+    Parameters
+    ----------
+    Q_raw : array-like, shape (N_obs,)
+        Raw charge values.
+    grid : FFTGrid
+        FFT grid built from the data range; hist/bins unused here.
+    pdf_extra, ser_ft, count_pgf : JAX callables
+        Same model pieces as for make_binned_logl.
+
+    Returns
+    -------
+    logl : callable
+        logl(log_A, extra, spe, lam, thres=None) -> scalar.
+    """
+    xsp = jnp.asarray(grid.xsp)
+    freq = jnp.asarray(grid.freq)
+    dq = float(grid.xsp_width)
+    i_zero = int(grid.i_zero)
+    N = len(grid.xsp)
+    N_obs = int(Q_raw.shape[0])
+    Q = jnp.asarray(Q_raw, dtype=jnp.float32)
+
+    def logl(log_A, extra, spe, lam, thres=None):
+        A = jnp.exp(log_A)
+        G_tilde = _spectrum_fft(
+            extra,
+            spe,
+            lam,
+            freq,
+            xsp,
+            dq,
+            i_zero,
+            pdf_extra,
+            ser_ft,
+            count_pgf,
+        )
+        G_vals = _density_at_q(G_tilde, Q, N, dq)
+        p_total = jnp.real(G_tilde[0])  # integral G dq ~ 1
+        return N_obs * jnp.log(A) + jnp.sum(jnp.log(G_vals)) - A * p_total
+
+    return logl
+
+
+# ==============================
 #     Density for plotting / diagnostics
 # ==============================
 
