@@ -37,9 +37,9 @@ from ..core.base import SpectrumFitter, ParamBlock
 from ..core.lambert_w import lambert_w0
 
 
-# ==============================
+# ==========================
 #     Reparameterisation
-# ==============================
+# ==========================
 
 
 def spe_from_reparam(a, b):
@@ -55,17 +55,17 @@ def reparam_from_spe(spe_mean, spe_sigma):
     return log(spe_sigma), log(spe_mean - spe_sigma)
 
 
-# ==============================
+# =====================
 #     JAX callables
-# ==============================
+# =====================
 
 
-def _pdf_extra(xsp, extra):
-    """Gaussian pedestal on xsp.  extra = (ped_mean, ped_sigma)."""
+def _ft_extra(freq, extra):
+    """Analytic Fourier transform of the Gaussian pedestal.
+    g̃0(ω) = exp(i·μ·ω − σ²·ω²/2)
+    """
     ped_mean, ped_sigma = extra[0], extra[1]
-    z = (xsp - ped_mean) / ped_sigma
-    norm = 1.0 / (ped_sigma * jnp.sqrt(2.0 * jnp.pi))
-    return norm * jnp.exp(-0.5 * z * z)
+    return jnp.exp(1j * ped_mean * freq - 0.5 * ped_sigma**2 * freq**2)
 
 
 def _ser_ft(freq, spe):
@@ -111,9 +111,9 @@ def _make_single_n_pgf(n):
     return pgf
 
 
-# ==============================
+# ========================
 #     GenTweedieFitter
-# ==============================
+# ========================
 
 
 class GenTweedieFitter(SpectrumFitter):
@@ -127,7 +127,7 @@ class GenTweedieFitter(SpectrumFitter):
     _DEFAULT_XI = 0.04
 
     def _model_callables(self):
-        return _pdf_extra, _ser_ft, _count_pgf, None
+        return _ft_extra, _ser_ft, _count_pgf, None
 
     def _default_extra_block(self) -> ParamBlock:
         pm = self._DEFAULT_PED_MEAN
