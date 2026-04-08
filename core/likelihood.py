@@ -84,7 +84,7 @@ def _bin_integrals(G_tilde, edges, freq, N, dq):
 # ==============================
 
 
-def make_binned_logl(grid, pdf_extra, ser_ft, count_pgf, efficiency=None):
+def make_binned_logl(grid, ft_extra, ser_ft, count_pgf, efficiency=None):
     """Build a binned extended-Poisson log-likelihood closure.
 
     Parameters
