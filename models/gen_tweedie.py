@@ -119,12 +119,12 @@ def _make_single_n_pgf(n):
 class GenTweedieFitter(SpectrumFitter):
     """Compound Generalized-Poisson / Gamma fitter with Gaussian pedestal."""
 
-    # default physical initial values (realistic for MCP-PMTs)
+    # default physical initial values
     _DEFAULT_PED_MEAN = -600.0
     _DEFAULT_PED_SIGMA = 600.0
     _DEFAULT_SPE_MEAN = 6000.0
     _DEFAULT_SPE_SIGMA = 800.0
-    _DEFAULT_XI = 0.1
+    _DEFAULT_XI = 0.04
 
     def _model_callables(self):
         return _pdf_extra, _ser_ft, _count_pgf, None
@@ -136,7 +136,7 @@ class GenTweedieFitter(SpectrumFitter):
             name="pedestal",
             names=["ped_mean", "ped_sigma"],
             init=np.array([pm, ps], dtype=float),
-            bounds=[(-5000.0, 5000.0), (1.0, 5000.0)],
+            bounds=[(-2000.0, 1500.0), (1.0, 2000.0)],
         )
 
     def _default_spe_block(self) -> ParamBlock:
