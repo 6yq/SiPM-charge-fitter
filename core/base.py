@@ -2,9 +2,9 @@
 # core/base.py
 #
 # Bundles for one spectrum:
-#   - static FFT grid,
-#   - JAX-jitted extended-Poisson log-likelihood (analytic Fourier bin
-#     integration, no sub-sampling),
+#   - static FFT grid built from raw Q array (FD binning by default),
+#   - JAX-jitted extended-Poisson log-likelihood — unbinned (NUFFT) by
+#     default, binned as fallback when bins= is given,
 #   - fast MLE via L-BFGS-B on JAX gradients,
 #   - per-n-PE component accessor,
 #   - Hessian-based 1-sigma errors.
@@ -74,13 +74,41 @@ class FitResult:
 
 
 class SpectrumFitter:
-    """Binned PMT spectrum fitter with JAX autodiff + analytic bin integration."""
+    """PMT spectrum fitter with JAX autodiff.
+
+    Accepts raw charge values Q_raw and builds the histogram internally.
+    Fitting is unbinned by default (NUFFT density at each Q); pass
+    mode="binned" to use the analytic Fourier bin integration instead.
+
+    Parameters
+    ----------
+    Q_raw : array-like, shape (N_obs,)
+        Raw charge values.
+    A : int or None
+        Total events including any not in Q_raw (e.g. pre-trigger).
+        Defaults to len(Q_raw).
+    bins : int | str | array-like | None
+        Forwarded to numpy.histogram.  None uses the Freedman-Diaconis
+        rule ("fd").
+    q_min, q_max : float or None
+        Override the FFT grid extent.
+    dq : float or None
+        FFT grid spacing.  Defaults to the histogram bin width.
+    extra_block, spe_block : ParamBlock or None
+        Parameter blocks; built via _default_* if None.
+    lam_init : float or None
+        Initial occupancy mean.  Estimated from data if None.
+    lam_bounds : tuple
+    log_A_err : float
+        Fractional half-width of the log_A bound around log(A).
+    mode : {"unbinned", "binned"}
+    """
 
     def __init__(
         self,
-        hist,
-        bins,
+        Q_raw,
         A=None,
+        bins=None,
         q_min=None,
         q_max=None,
         dq=None,
@@ -90,22 +118,34 @@ class SpectrumFitter:
         lam_bounds=(1e-6, 1e2),
         log_A_err: float = 0.05,
         mode: str = "unbinned",
-        Q_raw=None,
     ):
-        hist = np.asarray(hist, dtype=float)
-        bins = np.asarray(bins, dtype=float)
-        A = int(A) if A is not None else int(hist.sum())
+        Q_raw = np.asarray(Q_raw, dtype=float)
+        _A = A or len(Q_raw)
+
+        # ===========================
+        #     Internal histogram
+        # ===========================
+        _bins = "fd" if bins is None else bins
+        hist, bin_edges = np.histogram(Q_raw, bins=_bins)
 
         if lam_init is None:
-            occ_est = min(float(hist.sum()) / max(A, 1), 1.0 - 1e-9)
+            occ_est = min(float(hist.sum()) / max(_A, 1), 1.0 - 1e-9)
             lam_init = -log(1.0 - occ_est)
 
-        self.grid = build_grid(hist, bins, A=A, q_min=q_min, q_max=q_max, dq=dq)
+        self.Q_raw = Q_raw
+        self.hist = hist
+        self.bins = bin_edges
+        self.mode = mode
 
+        self.grid = build_grid(hist, bin_edges, A=_A, q_min=q_min, q_max=q_max, dq=dq)
+
+        # ========================
+        #     Parameter layout
+        # ========================
         self.extra_block = extra_block or self._default_extra_block()
         self.spe_block = spe_block or self._default_spe_block()
 
-        log_A_init = log(A)
+        log_A_init = log(_A)
         init_parts = [
             np.array([log_A_init]),
             np.asarray(self.extra_block.init, dtype=float),
@@ -137,21 +177,25 @@ class SpectrumFitter:
             + ["lam"]
         )
 
-        pdf_extra, ser_ft, count_pgf, efficiency = self._model_callables()
-        self._pdf_extra = pdf_extra
+        # ==================
+        #     Likelihood
+        # ==================
+        ft_extra, ser_ft, count_pgf, _ = self._model_callables()
+        self._ft_extra = ft_extra
         self._ser_ft = ser_ft
         self._count_pgf = count_pgf
 
         if mode == "unbinned":
-            if Q_raw is None:
-                raise ValueError("mode='unbinned' requires Q_raw.")
             self._logl_raw = make_unbinned_logl(
-                jnp.asarray(Q_raw), self.grid, pdf_extra, ser_ft, count_pgf
+                jnp.asarray(Q_raw, dtype=jnp.float32),
+                self.grid,
+                ft_extra,
+                ser_ft,
+                count_pgf,
             )
         else:
-            self._logl_raw = make_binned_logl(self.grid, pdf_extra, ser_ft, count_pgf)
-        self._mode = mode
-        
+            self._logl_raw = make_binned_logl(self.grid, ft_extra, ser_ft, count_pgf)
+
         self._logl_jit = jax.jit(self._logl_from_theta)
         self._grad_jit = jax.jit(jax.grad(self._logl_from_theta))
 
@@ -174,9 +218,9 @@ class SpectrumFitter:
     def logl(self, theta):
         return float(self._logl_jit(jnp.asarray(theta, dtype=jnp.float64)))
 
-    # ==============================
+    # ===========
     #     MLE
-    # ==============================
+    # ===========
 
     def fit_mle(self, theta0=None, maxiter=500, verbose=False):
         if theta0 is None:
@@ -228,21 +272,23 @@ class SpectrumFitter:
     #     Expected counts & density
     # ==============================
 
-    def estimate_bin_counts(self, theta):
-        """Expected counts per bin via analytic Fourier bin integration."""
-        log_A, extra, spe, lam = self._unpack(jnp.asarray(theta))
-        G_tilde = _spectrum_fft(
+    def _G_tilde(self, theta):
+        """Compute G_tilde from a theta array (JAX or numpy)."""
+        _, extra, spe, lam = self._unpack(jnp.asarray(theta))
+        return _spectrum_fft(
             extra,
             spe,
             lam,
             jnp.asarray(self.grid.freq),
-            jnp.asarray(self.grid.xsp),
-            float(self.grid.xsp_width),
-            int(self.grid.i_zero),
-            self._pdf_extra,
+            self._ft_extra,
             self._ser_ft,
             self._count_pgf,
         )
+
+    def estimate_bin_counts(self, theta):
+        """Expected counts per bin via analytic Fourier bin integration."""
+        log_A, *_ = self._unpack(jnp.asarray(theta))
+        G_tilde = self._G_tilde(theta)
         bin_int = _bin_integrals(
             G_tilde,
             jnp.asarray(self.grid.bins),
@@ -254,19 +300,9 @@ class SpectrumFitter:
 
     def estimate_density(self, theta):
         """Full density G(q) on the xsp grid (for plotting)."""
-        log_A, extra, spe, lam = self._unpack(jnp.asarray(theta))
-        g = density_on_xsp(
-            extra,
-            spe,
-            lam,
-            jnp.asarray(self.grid.freq),
-            float(self.grid.xsp_width),
-            int(self.grid.i_zero),
-            jnp.asarray(self.grid.xsp),
-            self._pdf_extra,
-            self._ser_ft,
-            self._count_pgf,
-        )
+        log_A, *_ = self._unpack(jnp.asarray(theta))
+        G_tilde = self._G_tilde(theta)
+        g = density_on_xsp(G_tilde, float(self.grid.xsp_width), int(self.grid.i_zero))
         return np.asarray(jnp.exp(log_A) * g)
 
     def estimate_component_counts(self, theta, n):
@@ -278,10 +314,7 @@ class SpectrumFitter:
             spe,
             lam,
             jnp.asarray(self.grid.freq),
-            jnp.asarray(self.grid.xsp),
-            float(self.grid.xsp_width),
-            int(self.grid.i_zero),
-            self._pdf_extra,
+            self._ft_extra,
             self._ser_ft,
             n_pgf,
         )
