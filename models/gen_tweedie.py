@@ -61,11 +61,11 @@ def reparam_from_spe(spe_mean, spe_sigma):
 
 
 def _ft_extra(freq, extra):
-    """Analytic Fourier transform of the Gaussian pedestal.
-    g̃0(ω) = exp(i·μ·ω − σ²·ω²/2)
+    """Analytic DFT of the Gaussian pedestal, matching numpy.fft convention.
+    g0~(w) = exp(-i*mu*w - sigma^2*w^2/2)
     """
     ped_mean, ped_sigma = extra[0], extra[1]
-    return jnp.exp(1j * ped_mean * freq - 0.5 * ped_sigma**2 * freq**2)
+    return jnp.exp(-1j * ped_mean * freq - 0.5 * ped_sigma**2 * freq**2)
 
 
 def _ser_ft(freq, spe):
