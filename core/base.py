@@ -242,7 +242,7 @@ class SpectrumFitter:
             jac=neg_grad,
             method="L-BFGS-B",
             bounds=self.bounds,
-            options={"maxiter": maxiter, "disp": verbose},
+            options={"maxiter": maxiter},
         )
 
         theta_hat = np.asarray(res.x, dtype=np.float64)
