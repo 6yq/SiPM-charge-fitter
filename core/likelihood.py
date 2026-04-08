@@ -8,49 +8,42 @@
 # In Fourier space:
 #     G~(w) = g0~(w) * pgf_N( f~(w); lam, ... )
 #
-# Given G~_n on a uniform grid of length N and spacing dq (so the period
-# is L = N * dq), the inverse-DFT reconstruction is
+# g0~(w) is supplied analytically by ft_extra(freq, extra).
 #
-#     G(q) = (1/L) * sum_n G~_n * exp(+i * w_n * q),
+# Given G~_n on a uniform grid of length N and spacing dq (period L=N*dq),
+# the inverse-DFT reconstruction is
 #
-# with w_n = 2*pi * fftfreq(N, dq).  The antiderivative is
+#     G(q) = (1/L) * sum_n G~_n * exp(+i * w_n * q)
+#
+# and the antiderivative is
 #
 #     I(q) = (G~_0 / L) * q
-#          + (1/L) * sum_{n != 0}  (G~_n / (i * w_n)) * exp(+i * w_n * q)
+#          + (1/L) * sum_{n!=0} (G~_n / (i*w_n)) * exp(+i*w_n*q)
 #
-# so any bin integral is just  I(b_{k+1}) - I(b_k), computed once over
-# all bin edges as a single matrix product.
+# so bin integrals are I(b_{k+1}) - I(b_k), one matrix product over all edges.
 #
-# This replaces the previous Simpson-on-sub-sampled-grid scheme: no
-# sub-sampling, no per-bin integration weights, no front/tail overflow
-# weights — the overflow probability is simply  Re(G~_0) - sum_k bin_int_k.
-#
-# Model-specific pieces are injected as plain JAX callables:
-#     pdf_extra(xsp, extra)      -> pedestal g0(q) on the uniform xsp grid
-#     ser_ft(freq, spe)          -> SPE characteristic function f~(w)
+# Model-specific pieces injected as JAX callables:
+#     ft_extra(freq, extra)      -> g0~(w), analytic pedestal FT, shape (N,) complex
+#     ser_ft(freq, spe)          -> f~(w), SPE characteristic function, shape (N,) complex
 #     count_pgf(s, lam, spe)     -> pgf of count distribution at s
 # ===========================================================================
 
 import jax.numpy as jnp
 
 
-# ==============================
+# =================================
 #     Fourier coefficients of G
-# ==============================
+# =================================
 
 
-def _spectrum_fft(extra, spe, lam, freq, xsp, dq, i_zero, pdf_extra, ser_ft, count_pgf):
+def _spectrum_fft(extra, spe, lam, freq, ft_extra, ser_ft, count_pgf):
     """Return G~_n on the uniform frequency grid.
 
-    The pedestal is rolled so that q=0 sits at index 0 before the FFT,
-    which makes the AC Fourier series reconstruct G(q) at the physical q
-    (not q - xsp[0]).
+    G~(w) = g0~(w) * pgf( f~(w) )
     """
-    g0 = pdf_extra(xsp, extra)
-    g0_rolled = jnp.roll(g0, -i_zero)
-    b_sp = jnp.fft.fft(g0_rolled) * dq  # g0~
+    b_sp = ft_extra(freq, extra)
     s = ser_ft(freq, spe)
-    return count_pgf(s, lam, spe) * b_sp  # G~
+    return count_pgf(s, lam, spe) * b_sp
 
 
 # ==============================
@@ -59,19 +52,14 @@ def _spectrum_fft(extra, spe, lam, freq, xsp, dq, i_zero, pdf_extra, ser_ft, cou
 
 
 def _bin_integrals(G_tilde, edges, freq, N, dq):
-    """Return integral_{edges[k]}^{edges[k+1]} G(q) dq  for each k.
+    """Return integral_{edges[k]}^{edges[k+1]} G(q) dq for each k.
 
     Parameters
     ----------
-    G_tilde : complex ndarray, length N
-        Fourier coefficients of G on the periodic xsp grid (convention:
-        G_tilde = fft(g_rolled) * dq, where g was rolled so q=0 -> index 0).
-    edges : ndarray, length nbin+1
-        Bin edges in physical q.
-    freq : ndarray, length N
-        Angular frequencies  w_n = 2*pi*fftfreq(N, dq).
-    N : int
-    dq : float
+    G_tilde : complex ndarray, shape (N,)
+    edges   : ndarray, shape (nbin+1,)
+    freq    : ndarray, shape (N,)   angular frequencies w_n = 2pi*fftfreq(N,dq)
+    N, dq   : int, float
     """
     L = N * dq
     inv_L = 1.0 / L
@@ -102,7 +90,7 @@ def make_binned_logl(grid, pdf_extra, ser_ft, count_pgf, efficiency=None):
     Parameters
     ----------
     grid : FFTGrid
-    pdf_extra, ser_ft, count_pgf : JAX-compatible callables
+    ft_extra, ser_ft, count_pgf : JAX-compatible callables
     efficiency : ignored (kept for future threshold support)
 
     Returns
@@ -110,30 +98,17 @@ def make_binned_logl(grid, pdf_extra, ser_ft, count_pgf, efficiency=None):
     logl : callable
         logl(log_A, extra, spe, lam, thres=None) -> scalar log-L.
     """
-    xsp = jnp.asarray(grid.xsp)
     freq = jnp.asarray(grid.freq)
     hist = jnp.asarray(grid.hist)
     edges = jnp.asarray(grid.bins)
     dq = float(grid.xsp_width)
-    i_zero = int(grid.i_zero)
     N = len(grid.xsp)
     zero = float(grid.zero)
     log_C = float(grid.log_C)
 
     def logl(log_A, extra, spe, lam, thres=None):
         A = jnp.exp(log_A)
-        G_tilde = _spectrum_fft(
-            extra,
-            spe,
-            lam,
-            freq,
-            xsp,
-            dq,
-            i_zero,
-            pdf_extra,
-            ser_ft,
-            count_pgf,
-        )
+        G_tilde = _spectrum_fft(extra, spe, lam, freq, ft_extra, ser_ft, count_pgf)
 
         bin_int = _bin_integrals(G_tilde, edges, freq, N, dq)
         y_est = jnp.maximum(A * bin_int, 1e-32)
@@ -171,7 +146,7 @@ def _density_at_q(G_tilde, Q_raw, N, dq):
     return jnp.maximum(jnp.real(vals) / L, 1e-32)
 
 
-def make_unbinned_logl(Q_raw, grid, pdf_extra, ser_ft, count_pgf):
+def make_unbinned_logl(Q_raw, grid, ft_extra, ser_ft, count_pgf):
     """Build an unbinned extended-Poisson log-likelihood closure.
 
     G(q) is evaluated at each raw charge value via NUFFT (type-2:
@@ -189,7 +164,7 @@ def make_unbinned_logl(Q_raw, grid, pdf_extra, ser_ft, count_pgf):
         Raw charge values.
     grid : FFTGrid
         FFT grid built from the data range; hist/bins unused here.
-    pdf_extra, ser_ft, count_pgf : JAX callables
+    ft_extra, ser_ft, count_pgf : JAX callables
         Same model pieces as for make_binned_logl.
 
     Returns
@@ -197,59 +172,40 @@ def make_unbinned_logl(Q_raw, grid, pdf_extra, ser_ft, count_pgf):
     logl : callable
         logl(log_A, extra, spe, lam, thres=None) -> scalar.
     """
-    xsp = jnp.asarray(grid.xsp)
     freq = jnp.asarray(grid.freq)
     dq = float(grid.xsp_width)
-    i_zero = int(grid.i_zero)
     N = len(grid.xsp)
     N_obs = int(Q_raw.shape[0])
     Q = jnp.asarray(Q_raw, dtype=jnp.float32)
 
     def logl(log_A, extra, spe, lam, thres=None):
         A = jnp.exp(log_A)
-        G_tilde = _spectrum_fft(
-            extra,
-            spe,
-            lam,
-            freq,
-            xsp,
-            dq,
-            i_zero,
-            pdf_extra,
-            ser_ft,
-            count_pgf,
-        )
+        G_tilde = _spectrum_fft(extra, spe, lam, freq, ft_extra, ser_ft, count_pgf)
         G_vals = _density_at_q(G_tilde, Q, N, dq)
-        p_total = jnp.real(G_tilde[0])  # integral G dq ~ 1
+        p_total = jnp.real(G_tilde[0])
         return N_obs * jnp.log(A) + jnp.sum(jnp.log(G_vals)) - A * p_total
 
     return logl
 
 
-# ==============================
-#     Density for plotting / diagnostics
-# ==============================
+# ============================
+#     Density for plotting
+# ============================
 
 
-def density_on_xsp(
-    extra, spe, lam, freq, xsp_width, i_zero, xsp, pdf_extra, ser_ft, count_pgf
-):
-    """Return G(q) on the uniform xsp grid via inverse FFT.
+def density_on_xsp(G_tilde, xsp_width, i_zero):
+    """Return G(q) on the uniform xsp grid via IFFT of precomputed G_tilde.
 
-    Only used for plotting — the likelihood never needs this.
+    Parameters
+    ----------
+    G_tilde   : complex ndarray, shape (N,)   precomputed by _spectrum_fft
+    xsp_width : float                          grid spacing dq
+    i_zero    : int                            index where xsp[i_zero] = 0
+
+    Returns
+    -------
+    density : real ndarray, shape (N,)
     """
-    G_tilde = _spectrum_fft(
-        extra,
-        spe,
-        lam,
-        freq,
-        xsp,
-        float(xsp_width),
-        int(i_zero),
-        pdf_extra,
-        ser_ft,
-        count_pgf,
-    )
     density = jnp.real(jnp.fft.ifft(G_tilde)) / float(xsp_width)
     density = jnp.roll(density, int(i_zero))
     return jnp.maximum(density, 0.0)
