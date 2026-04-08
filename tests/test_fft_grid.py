@@ -1,8 +1,8 @@
-# ===========================================================================
+# ============================================
 # tests/test_fft_grid.py
 #
 # Geometry invariants of the minimal FFT grid.
-# ===========================================================================
+# ============================================
 
 import numpy as np
 import pytest
@@ -16,9 +16,9 @@ def _make_hist():
     return hist, bins
 
 
-# ==============================
+# =============================
 #     q=0 is always covered
-# ==============================
+# =============================
 
 
 def test_grid_always_reaches_zero():
@@ -41,9 +41,9 @@ def test_grid_covers_q_max():
     assert grid.xsp[-1] >= 80000.0 - grid.xsp_width
 
 
-# ==============================
+# ===========================
 #     Power-of-two length
-# ==============================
+# ===========================
 
 
 def test_length_is_power_of_two():
@@ -53,9 +53,9 @@ def test_length_is_power_of_two():
     assert N & (N - 1) == 0, f"N={N} is not a power of 2"
 
 
-# ==============================
+# =======================
 #     Uniform spacing
-# ==============================
+# =======================
 
 
 def test_xsp_is_uniform():
@@ -77,9 +77,9 @@ def test_custom_dq_honored():
     assert np.isclose(grid.xsp_width, 50.0)
 
 
-# ==============================
+# ======================
 #     Frequency axis
-# ==============================
+# ======================
 
 
 def test_freq_length_and_dc():
@@ -89,9 +89,9 @@ def test_freq_length_and_dc():
     assert grid.freq[0] == 0.0  # DC term at index 0
 
 
-# ==============================
+# ============================
 #     Overflow bookkeeping
-# ==============================
+# ============================
 
 
 def test_zero_count_matches():

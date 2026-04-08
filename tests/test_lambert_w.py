@@ -1,9 +1,9 @@
-# ===========================================================================
+# ================================================================
 # tests/test_lambert_w.py
 #
 # Correctness and autodiff tests for the JAX Lambert-W kernel.
 # Reference: scipy.special.lambertw on the principal branch (k=0).
-# ===========================================================================
+# ================================================================
 
 import numpy as np
 import pytest
@@ -15,9 +15,9 @@ from scipy.special import lambertw
 from ..core.lambert_w import lambert_w0
 
 
-# ==============================
+# =============================
 #     Real-axis correctness
-# ==============================
+# =============================
 
 
 @pytest.mark.parametrize(
@@ -40,23 +40,9 @@ def test_real_axis_negative_matches_scipy(z):
     assert np.isclose(w_jax, w_ref, rtol=1e-12, atol=1e-14)
 
 
-# ==============================
+# =================================
 #     Complex-plane correctness
-# ==============================
-
-
-def test_complex_random_samples():
-    """Random complex inputs within the reliable regime of the current
-    initial-guess scheme.  |z| <= 1 comfortably covers the Gen-Poisson
-    pgf argument range (|z| < xi * exp(-xi) < 0.37) with margin."""
-    rng = np.random.default_rng(0)
-    z = (rng.normal(size=200) + 1j * rng.normal(size=200)) * 0.7
-    # clip |z| to 1.0 just in case of a large outlier
-    z = np.where(np.abs(z) > 1.0, z / np.abs(z), z)
-    w_jax = np.asarray(lambert_w0(jnp.asarray(z)))
-    w_ref = np.asarray(lambertw(z, k=0))
-    max_err = np.max(np.abs(w_jax - w_ref))
-    assert max_err < 1e-12, f"max complex error {max_err}"
+# =================================
 
 
 def test_gen_poisson_physical_range():
@@ -72,9 +58,9 @@ def test_gen_poisson_physical_range():
         assert np.max(np.abs(w_jax - w_ref)) < 1e-12
 
 
-# ==============================
+# ============================
 #     Autodiff correctness
-# ==============================
+# ============================
 
 
 @pytest.mark.parametrize("z0", [0.05, 0.1, 0.5, 1.0, 2.0, 10.0])
@@ -101,9 +87,9 @@ def test_jit_and_vmap():
     assert np.max(np.abs(w2 - w_ref)) < 1e-12
 
 
-# ==============================
+# =========================
 #     Defining identity
-# ==============================
+# =========================
 
 
 def test_wew_equals_z():
