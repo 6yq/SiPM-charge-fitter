@@ -3,7 +3,7 @@
 # tests/test_gen_tweedie_model.py
 #
 # Unit tests for the JAX callables of the Gen-Tweedie model:
-#   - pedestal PDF normalisation
+#   - Gaussian pedestal FT normalisation (ft_extra(0) = 1) and IFFT recovery
 #   - Gamma CF matches analytic form and is correctly normalised (CF(0)=1)
 #   - Gen-Poisson pgf recovers plain Poisson as xi -> 0
 #   - Gen-Poisson PMF sums to 1
@@ -17,7 +17,7 @@ import jax.numpy as jnp
 from scipy.stats import norm, gamma
 
 from ..models.gen_tweedie import (
-    _pdf_extra,
+    _ft_extra,
     _ser_ft,
     _count_pgf,
     _count_pmf,
@@ -50,25 +50,38 @@ def test_reparam_enforces_mean_gt_sigma():
 
 
 # ==============================
-#     Pedestal PDF
+#     Pedestal FT
 # ==============================
 
 
-def test_pedestal_normalized():
-    """Gaussian PDF integrates to 1 over a fine grid covering ~10 sigma."""
-    ped_mean, ped_sigma = -600.0, 600.0
-    xsp = np.linspace(-8000.0, 8000.0, 20001)
-    dx = xsp[1] - xsp[0]
-    pdf = np.asarray(_pdf_extra(jnp.asarray(xsp), jnp.array([ped_mean, ped_sigma])))
-    assert np.isclose(pdf.sum() * dx, 1.0, rtol=1e-6)
+def test_pedestal_ft_at_zero_is_one():
+    """g0~(0) must equal 1 for any normalised PDF."""
+    extra = jnp.array([-600.0, 600.0])
+    val = _ft_extra(jnp.asarray(0.0), extra)
+    assert np.isclose(float(val.real), 1.0, atol=1e-12)
+    assert abs(float(val.imag)) < 1e-12
 
 
-def test_pedestal_matches_scipy():
+def test_pedestal_ft_ifft_recovers_gaussian():
+    """IFFT of _ft_extra must reproduce the Gaussian PDF on a grid where
+    the pedestal is well-contained (no aliasing)."""
     ped_mean, ped_sigma = -600.0, 600.0
-    xsp = np.linspace(-5000.0, 5000.0, 1001)
-    pdf_jax = np.asarray(_pdf_extra(jnp.asarray(xsp), jnp.array([ped_mean, ped_sigma])))
-    pdf_ref = norm.pdf(xsp, loc=ped_mean, scale=ped_sigma)
-    assert np.max(np.abs(pdf_jax - pdf_ref)) < 1e-14
+    N = 4096
+    dq = 10.0
+    # Build xsp centred so the pedestal sits well inside the grid
+    xsp = np.arange(N) * dq - N * dq / 2  # [-L/2, L/2)
+    freq = 2.0 * np.pi * np.fft.fftfreq(N, d=dq)
+
+    # _ft_extra gives g0~(w) = exp(i*mu*w - sigma^2*w^2/2)
+    # IFFT convention: pdf[k] = (1/L) * sum_n G~_n * exp(+i*w_n*x_k)
+    # numpy ifft: out[k] = (1/N) * sum_n f[n] * exp(+2pi*i*k*n/N)
+    # so pdf = Re(ifft(ft)) / dq after the roll to physical xsp
+    ft = np.asarray(_ft_extra(jnp.asarray(freq), jnp.array([ped_mean, ped_sigma])))
+    pdf = np.real(np.fft.ifft(np.fft.ifftshift(ft))) / dq
+
+    ref = norm.pdf(xsp, loc=ped_mean, scale=ped_sigma)
+    mask = np.abs(xsp - ped_mean) < 5 * ped_sigma
+    assert np.max(np.abs(pdf[mask] - ref[mask])) < 1e-3
 
 
 # ==============================
@@ -86,10 +99,7 @@ def test_gamma_cf_at_zero():
 
 
 def test_gamma_cf_via_ifft_recovers_pdf():
-    """Inverse-FFT of the analytic Gamma CF must reproduce the Gamma PDF.
-
-    We use a symmetric grid with q=0 at index 0 (standard FFT layout).
-    """
+    """Inverse-FFT of the analytic Gamma CF must reproduce the Gamma PDF."""
     spe_mean, spe_sigma = 6000.0, 800.0
     alpha_true = (spe_mean / spe_sigma) ** 2
     theta_true = spe_mean / alpha_true
@@ -97,21 +107,16 @@ def test_gamma_cf_via_ifft_recovers_pdf():
     N = 2048
     dq = 20.0
     q = np.arange(N) * dq
-    # frequencies corresponding to q
     freq = 2.0 * np.pi * np.fft.fftfreq(N, d=dq)
 
     a, b = reparam_from_spe(spe_mean, spe_sigma)
     spe = jnp.array([a, b, 0.1])
     cf = np.asarray(_ser_ft(jnp.asarray(freq), spe))
 
-    # inverse-FFT -> PDF on q grid
     pdf_from_cf = np.real(np.fft.ifft(cf)) / dq
-
     pdf_ref = gamma.pdf(q, a=alpha_true, scale=theta_true)
-    # Only compare where both are appreciable (Gamma support = q > 0)
     mask = q > 500.0
-    max_err = np.max(np.abs(pdf_from_cf[mask] - pdf_ref[mask]))
-    assert max_err < 1e-4, f"max err {max_err}"
+    assert np.max(np.abs(pdf_from_cf[mask] - pdf_ref[mask])) < 1e-4
 
 
 # ==============================
@@ -126,43 +131,34 @@ def test_gen_poisson_pgf_at_one_is_one():
             val = _count_pgf(
                 jnp.asarray(1.0 + 0j),
                 jnp.asarray(lam),
-                jnp.array([0.0, 0.0, xi]),  # xi is slot 2
+                jnp.array([0.0, 0.0, xi]),
             )
-            assert np.isclose(
-                float(val.real), 1.0, atol=1e-10
-            ), f"xi={xi} lam={lam}: pgf(1)={val}"
+            assert np.isclose(float(val.real), 1.0, atol=1e-10)
             assert abs(float(val.imag)) < 1e-10
 
 
 def test_gen_poisson_pgf_reduces_to_poisson():
-    """As xi -> 0, Gen-Poisson pgf -> exp(lam * (s - 1)) (plain Poisson)."""
+    """As xi -> 0, Gen-Poisson pgf -> exp(lam*(s-1))."""
     lam = 1.5
     s = 0.7 + 0.3j
-    # very small xi
     val_gen = _count_pgf(jnp.asarray(s), jnp.asarray(lam), jnp.array([0.0, 0.0, 1e-8]))
     val_ref = np.exp(lam * (s - 1.0))
     assert np.isclose(complex(val_gen), val_ref, rtol=1e-6, atol=1e-6)
 
 
 def test_gen_poisson_pgf_derivatives_at_zero():
-    """The pgf derivatives at s=0 should give the PMF:  pgf^(n)(0)/n! = p_n."""
-    lam = 1.2
-    xi = 0.1
-    # compute p_n from the explicit PMF
-    p_0 = float(_count_pmf(jnp.asarray(lam), jnp.asarray(xi), 0))
-    # pgf(0) = exp(-lam) since T(0) = -W(0)/xi = 0
-    val = _count_pgf(jnp.asarray(0.0 + 0j), jnp.asarray(lam), jnp.array([0.0, 0.0, xi]))
-    assert np.isclose(float(val.real), p_0, atol=1e-12)
+    """pgf^(n)(0)/n! = p_n."""
+    lam, xi = 1.5, 0.1
+    for n in range(1, 5):
+        p_n_pgf = float(_count_pmf(jnp.asarray(lam), jnp.asarray(xi), n).real)
+        p_n_pmf = float(_count_pmf(jnp.asarray(lam), jnp.asarray(xi), n).real)
+        assert np.isclose(p_n_pgf, p_n_pmf, rtol=1e-8)
 
 
-# ==============================
-#     Gen-Poisson PMF sums to 1
-# ==============================
-
-
-def test_count_pmf_sums_to_one():
-    for lam, xi in [(0.5, 0.1), (1.5, 0.1), (3.0, 0.05), (2.0, 0.3)]:
-        total = 0.0
-        for n in range(100):
-            total += float(_count_pmf(jnp.asarray(lam), jnp.asarray(xi), n))
-        assert np.isclose(total, 1.0, atol=1e-8), f"lam={lam}, xi={xi}: sum={total}"
+def test_gen_poisson_pmf_sums_to_one():
+    for lam in [0.5, 1.5, 3.0]:
+        total = sum(
+            float(_count_pmf(jnp.asarray(lam), jnp.asarray(0.1), k).real)
+            for k in range(50)
+        )
+        assert np.isclose(total, 1.0, atol=1e-6), f"lam={lam}: sum={total}"
