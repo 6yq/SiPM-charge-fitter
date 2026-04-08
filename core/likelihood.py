@@ -214,3 +214,49 @@ def density_on_xsp(G_tilde, xsp_width, i_zero):
 def bin_integrals_for_theta(G_tilde, edges, freq, N, dq):
     """Public accessor for the analytic bin integrals (used by diagnostics)."""
     return _bin_integrals(G_tilde, edges, freq, N, dq)
+
+
+# ==================================
+#     Per-channel lam likelihood
+# ==================================
+
+
+def make_lam_logl(freq, dq, N, ft_extra, ser_ft, count_pgf):
+    """Build a per-channel log-likelihood closure over lam for reconstruction.
+
+    All channels sharing the same grid geometry (freq, dq, N) and model
+    callables can reuse one closure.  Per-channel calibration parameters
+    (extra, spe) and the observed charge Q are passed at call time, making
+    the function vmappable over channels.
+
+    The likelihood is shape-only:
+        ell(lam | Q, extra, spe) = log G(Q; extra, spe, lam)
+
+    The normalisation Re(G̃₀) is independent of Q and dropped.
+
+    Parameters
+    ----------
+    freq                        : jnp array, shape (N,)  angular frequencies
+    dq                          : float                   grid spacing
+    N                           : int                     grid length
+    ft_extra, ser_ft, count_pgf : JAX callables
+
+    Returns
+    -------
+    logl_fn : callable
+        logl_fn(lam, Q, extra, spe) -> scalar
+        vmappable over (lam, Q, extra, spe) simultaneously.
+    grad_fn : callable
+        grad_fn(lam, Q, extra, spe) -> scalar  d(logl)/d(lam)
+    """
+    freq = jnp.asarray(freq)
+
+    def logl_fn(lam, Q, extra, spe):
+        G_tilde = _spectrum_fft(extra, spe, lam, freq, ft_extra, ser_ft, count_pgf)
+        G_val = _density_at_q(G_tilde, jnp.asarray([Q], dtype=jnp.float32), N, dq)
+        return jnp.log(G_val[0])
+
+    grad_fn = jax.jit(jax.vmap(jax.grad(logl_fn, argnums=0)))
+    logl_fn = jax.jit(jax.vmap(logl_fn))
+
+    return logl_fn, grad_fn
