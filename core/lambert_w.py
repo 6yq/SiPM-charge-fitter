@@ -14,9 +14,9 @@ import jax
 import jax.numpy as jnp
 
 
-# ==============================
+# ===============================
 #     Halley iteration kernel
-# ==============================
+# ===============================
 
 
 def _initial_guess(z):
@@ -61,11 +61,16 @@ def _halley_step(w, z):
     return w - f / denom
 
 
-def _lambert_w_iterate(z, n_iter=12):
+def _lambert_w_iterate(z, n_iter=6):
     """Run a fixed number of Halley iterations.
 
     12 iterations is overkill for double precision (Halley converges cubically
-    so 4–5 are usually enough) but keeps us safe near the branch point.
+    so 4-5 are usually enough) but keeps us safe near the branch point.
+
+    Notes
+    -----
+    2026.4.8:
+        Let's take 6 iterations then.
     """
     z = z.astype(jnp.complex128)
     w = _initial_guess(z)
@@ -76,9 +81,9 @@ def _lambert_w_iterate(z, n_iter=12):
     return jax.lax.fori_loop(0, n_iter, body, w)
 
 
-# ==============================
+# ==========================
 #     Custom-JVP wrapper
-# ==============================
+# ==========================
 
 
 @jax.custom_jvp
