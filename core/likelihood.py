@@ -28,6 +28,7 @@
 #     count_pgf(s, lam, spe)     -> pgf of count distribution at s
 # ===========================================================================
 
+import jax
 import jax.numpy as jnp
 
 
@@ -146,6 +147,23 @@ def _density_at_q(G_tilde, Q_raw, N, dq):
     return jnp.maximum(jnp.real(vals) / L, 1e-32)
 
 
+# def _density_at_q(G_tilde, Q_scalar, N, dq):
+#     """Evaluate log G(q) at a single point via direct Fourier sum.
+
+#     For a scalar Q this is cheaper and more vmap-friendly than NUFFT.
+#     G(q) = (1/L) * Re( sum_n G~_n * exp(+i * w_n * q) )
+#     """
+#     import jax
+
+#     L = N * dq
+#     freq = (
+#         2.0 * jnp.pi * jnp.fft.fftfreq(N, d=dq)
+#     )  # already available as closed-over freq_j
+#     phase = jnp.exp(1j * freq * Q_scalar.astype(jnp.float64))
+#     G_val = jnp.real(jnp.dot(G_tilde, phase)) / L
+#     return jnp.log(jnp.maximum(G_val, 1e-32))
+
+
 def make_unbinned_logl(Q_raw, grid, ft_extra, ser_ft, count_pgf):
     """Build an unbinned extended-Poisson log-likelihood closure.
 
@@ -221,42 +239,108 @@ def bin_integrals_for_theta(G_tilde, edges, freq, N, dq):
 # ==================================
 
 
+def _count_u_from_pgf0(s, spe, count_pgf):
+    """Return u(s) for count_pgf(s, lam, spe) = exp(lam * u(s, spe)).
+
+    For the reconstruction path we use the fact that the count PGF is
+    exponential-linear in lam. Since count_pgf(..., 0, ...) = 1, the
+    derivative at lam = 0 equals u.
+    """
+
+    def _pgf_of_lam(lam_scalar):
+        return count_pgf(s, lam_scalar, spe)
+
+    return jax.jacfwd(_pgf_of_lam)(0.0)
+
+
+# ==================================
+#     Per-channel lam likelihood
+# ==================================
+
+
 def make_lam_logl(freq, dq, N, ft_extra, ser_ft, count_pgf):
-    """Build a per-channel log-likelihood closure over lam for reconstruction.
+    """Factory for the per-event reconstruction likelihood.
 
-    All channels sharing the same grid geometry (freq, dq, N) and model
-    callables can reuse one closure.  Per-channel calibration parameters
-    (extra, spe) and the observed charge Q are passed at call time, making
-    the function vmappable over channels.
+    Only fired channels are passed to this function — unfired channels
+    contribute -lam_j to the NLL with trivial gradient, handled outside.
 
-    The likelihood is shape-only:
-        ell(lam | Q, extra, spe) = log G(Q; extra, spe, lam)
-
-    The normalisation Re(G̃₀) is independent of Q and dropped.
+    The channel-calibration quantities are fixed across events, so they
+    should be precomputed once via precompute_channels. For each event,
+    only the observed charge Q enters through the Fourier phase factor;
+    this is handled by precompute_event. During optimisation, only lam
+    changes.
 
     Parameters
     ----------
-    freq                        : jnp array, shape (N,)  angular frequencies
-    dq                          : float                   grid spacing
-    N                           : int                     grid length
-    ft_extra, ser_ft, count_pgf : JAX callables
+    freq, dq, N             : shared grid geometry
+    ft_extra, ser_ft,
+    count_pgf               : JAX model callables
 
     Returns
     -------
-    logl_fn : callable
-        logl_fn(lam, Q, extra, spe) -> scalar
-        vmappable over (lam, Q, extra, spe) simultaneously.
-    grad_fn : callable
-        grad_fn(lam, Q, extra, spe) -> scalar  d(logl)/d(lam)
+    precompute_channels : callable
+        precompute_channels(extra, spe) -> (s_all, g0_all, u_all)
+        Called once for all active channels.
+        extra: (n_ch, 2), spe: (n_ch, 3)
+        s_all:  (n_ch, N) complex  -- SPE char function
+        g0_all: (n_ch, N) complex  -- pedestal FT
+        u_all:  (n_ch, N) complex  -- linear term in log pgf
+
+    precompute_event : callable
+        precompute_event(Q, fired_idx, g0_all, u_all) -> (u_sel, g0_phase)
+        Called once per event for fired channels.
+        Q: (n_fired,), fired_idx: (n_fired,) int32/int64
+        u_sel:    (n_fired, N) complex
+        g0_phase: (n_fired, N) complex
+
+    logl_and_grad_fn : callable
+        logl_and_grad_fn(lam, u_sel, g0_phase) -> (logl, grad)
+        lam: (n_fired,), outputs both shape (n_fired,).
+        Computes logl and d(logl)/d(lam_j) analytically in one pass.
     """
-    freq = jnp.asarray(freq)
+    freq_j = jnp.asarray(freq)
+    L = float(N * dq)
 
-    def logl_fn(lam, Q, extra, spe):
-        G_tilde = _spectrum_fft(extra, spe, lam, freq, ft_extra, ser_ft, count_pgf)
-        G_val = _density_at_q(G_tilde, jnp.asarray([Q], dtype=jnp.float32), N, dq)
-        return jnp.log(G_val[0])
+    def precompute_channels(extra, spe):
+        """Precompute channel-wise arrays independent of event and lam."""
+        s_all = jax.vmap(lambda spe_j: ser_ft(freq_j, spe_j))(spe)  # (n_ch, N)
+        g0_all = jax.vmap(lambda ex_j: ft_extra(freq_j, ex_j))(extra)  # (n_ch, N)
+        u_all = jax.vmap(lambda s_j, spe_j: _count_u_from_pgf0(s_j, spe_j, count_pgf))(
+            s_all, spe
+        )  # (n_ch, N)
+        return s_all, g0_all, u_all
 
-    grad_fn = jax.jit(jax.vmap(jax.grad(logl_fn, argnums=0)))
-    logl_fn = jax.jit(jax.vmap(logl_fn))
+    def precompute_event(Q, fired_idx, g0_all, u_all):
+        """Precompute event-wise arrays for fired channels only.
 
-    return logl_fn, grad_fn
+        The observed charge enters only through exp(+i * w * Q_j), i.e. the
+        Fourier kernel used to evaluate G_j at q = Q_j.
+        """
+        g0_sel = g0_all[fired_idx]  # (n_fired, N)
+        u_sel = u_all[fired_idx]  # (n_fired, N)
+        phase = jnp.exp(1j * jnp.outer(Q.astype(jnp.float64), freq_j))  # (n_fired, N)
+        return u_sel, g0_sel * phase
+
+    def logl_and_grad_fn(lam, u_sel, g0_phase):
+        """Analytic logl and gradient w.r.t. lam for fired channels.
+
+        G_j(Q_j; lam_j) = (1/L) * Re( sum_n exp(lam_j * u_jn) * g0_phase_jn )
+
+        d(log G_j)/d(lam_j) = Re( sum_n u_jn * exp(lam_j * u_jn) * g0_phase_jn )
+                               / (L * G_j)
+
+        Both numerator and denominator share the same exponential matrix, so the
+        gradient costs no extra FFT — one matrix product computes both.
+        """
+        expo = jnp.exp(lam[:, None] * u_sel)  # (n_fired, N)
+        wt = expo * g0_phase  # (n_fired, N)
+        G_val = jnp.real(jnp.sum(wt, axis=1)) / L  # (n_fired,)
+        dG = jnp.real(jnp.sum(u_sel * wt, axis=1)) / L  # (n_fired,)
+        G_safe = jnp.maximum(G_val, 1e-32)
+        return jnp.log(G_safe), dG / G_safe
+
+    precompute_channels_jit = jax.jit(precompute_channels)
+    precompute_event_jit = jax.jit(precompute_event)
+    logl_and_grad_jit = jax.jit(logl_and_grad_fn)
+
+    return precompute_channels_jit, precompute_event_jit, logl_and_grad_jit

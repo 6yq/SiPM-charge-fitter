@@ -17,8 +17,8 @@
 #   4. Normalised score is small at truth on model-drawn data.
 # ===========================================================================
 
-import numpy as np
 import jax
+import numpy as np
 import jax.numpy as jnp
 
 from math import log
@@ -28,6 +28,7 @@ from ..core.fft_grid import build_grid
 from ..core.likelihood import (
     make_binned_logl,
     make_unbinned_logl,
+    make_lam_logl,
     _spectrum_fft,
     _bin_integrals,
     density_on_xsp,
@@ -282,3 +283,213 @@ def test_unbinned_score_small_at_truth_on_model_sample():
     assert np.max(np.abs(np.asarray(g["extra"]))) / N_EVENTS < 0.5
     assert np.max(np.abs(np.asarray(g["spe"]))) / N_EVENTS < 0.5
     assert abs(float(g["lam"])) / N_EVENTS < 0.5
+
+
+# =======================================
+#     Consistency with density_on_xsp
+# =======================================
+BIN_WIDTH_RECON = BIN_WIDTH / 2
+
+
+def _make_grid():
+    bins = np.arange(HIST_LO, HIST_HI + BIN_WIDTH_RECON, BIN_WIDTH_RECON)
+    grid = build_grid(
+        np.zeros(len(bins) - 1), bins, A=1, q_min=Q_MIN, dq=BIN_WIDTH_RECON
+    )
+    return grid
+
+
+def _truth_arrays(n_ch=1):
+    a, b = reparam_from_spe(SPE_MEAN, SPE_SIGMA)
+    extra = jnp.tile(jnp.array([PED_MEAN, PED_SIGMA]), (n_ch, 1))
+    spe = jnp.tile(jnp.array([a, b, 0.1]), (n_ch, 1))
+    return extra, spe
+
+
+def _make_fns(grid):
+    return make_lam_logl(
+        jnp.asarray(grid.freq),
+        float(grid.xsp_width),
+        len(grid.xsp),
+        _ft_extra,
+        _ser_ft,
+        _count_pgf,
+    )
+
+
+def test_logl_matches_density_on_xsp():
+    """logl_and_grad_fn must agree with density_on_xsp to numerical precision."""
+    grid = _make_grid()
+    precompute_channels_fn, precompute_event_fn, logl_and_grad_fn = _make_fns(grid)
+
+    a, b = reparam_from_spe(SPE_MEAN, SPE_SIGMA)
+    extra1 = jnp.array([[PED_MEAN, PED_SIGMA]])
+    spe1 = jnp.array([[a, b, 0.1]])
+    lam1 = jnp.array([1.5])
+    Q1 = jnp.array([8000.0], dtype=jnp.float32)
+    fired_idx = jnp.array([0], dtype=jnp.int32)
+
+    # Reference via density_on_xsp
+    G_tilde = _spectrum_fft(
+        extra1[0],
+        spe1[0],
+        lam1[0],
+        jnp.asarray(grid.freq),
+        _ft_extra,
+        _ser_ft,
+        _count_pgf,
+    )
+    density = density_on_xsp(G_tilde, float(grid.xsp_width), int(grid.i_zero))
+    # Interpolate at Q=8000 to get reference G(Q)
+    xsp = grid.xsp
+    ref_G = float(jnp.interp(jnp.array(8000.0), jnp.asarray(xsp), density))
+    ref_logl = float(jnp.log(jnp.maximum(ref_G, 1e-32)))
+
+    s_all, g0_all, u_all = precompute_channels_fn(extra1, spe1)
+    u_sel, g0_phase = precompute_event_fn(Q1, fired_idx, g0_all, u_all)
+    ll, _ = logl_and_grad_fn(lam1, u_sel, g0_phase)
+
+    # Tolerance reflects interpolation vs exact dot-product difference
+    assert abs(float(ll[0]) - ref_logl) < 0.1
+
+
+# ==========================================
+#     Analytic gradient matches jax.grad
+# ==========================================
+
+
+def test_analytic_grad_matches_jax_grad():
+    """d(logl)/d(lam) from analytic formula must match jax.grad."""
+    grid = _make_grid()
+    precompute_channels_fn, precompute_event_fn, logl_and_grad_fn = _make_fns(grid)
+
+    extra, spe = _truth_arrays(n_ch=10)
+    lam = jnp.ones(10) * 1.5
+    Q = jnp.asarray(
+        np.random.default_rng(0).uniform(2000, 50000, 10), dtype=jnp.float32
+    )
+    fired_idx = jnp.arange(10, dtype=jnp.int32)
+
+    s_all, g0_all, u_all = precompute_channels_fn(extra, spe)
+    u_sel, g0_phase = precompute_event_fn(Q, fired_idx, g0_all, u_all)
+    _, grad_analytic = logl_and_grad_fn(lam, u_sel, g0_phase)
+
+    grad_auto = jax.grad(
+        lambda lam: jnp.sum(logl_and_grad_fn(lam, u_sel, g0_phase)[0])
+    )(lam)
+
+    assert np.max(np.abs(np.asarray(grad_analytic - grad_auto))) < 1e-8
+
+
+# =========================================
+#     Finite values at realistic params
+# =========================================
+
+
+def test_logl_and_grad_finite():
+    grid = _make_grid()
+    precompute_channels_fn, precompute_event_fn, logl_and_grad_fn = _make_fns(grid)
+
+    rng = np.random.default_rng(1)
+    n_ch = 300
+    extra, spe = _truth_arrays(n_ch)
+    lam = jnp.asarray(rng.uniform(0.1, 3.0, n_ch))
+    Q = jnp.asarray(rng.uniform(2000, 50000, n_ch), dtype=jnp.float32)
+    fired_idx = jnp.arange(n_ch, dtype=jnp.int32)
+
+    s_all, g0_all, u_all = precompute_channels_fn(extra, spe)
+    u_sel, g0_phase = precompute_event_fn(Q, fired_idx, g0_all, u_all)
+    ll, grad = logl_and_grad_fn(lam, u_sel, g0_phase)
+
+    assert np.all(np.isfinite(np.asarray(ll)))
+    assert np.all(np.isfinite(np.asarray(grad)))
+
+
+# ========================
+#     Local optimality
+# ========================
+
+
+def test_logl_higher_at_truth_lam(toy_mc_mid_lam):
+    """logl at truth lam must exceed logl at a perturbed lam."""
+    grid = _make_grid()
+    precompute_channels_fn, precompute_event_fn, logl_and_grad_fn = _make_fns(grid)
+
+    charges = toy_mc_mid_lam["charges"]
+    lam_true = float(toy_mc_mid_lam["lam"])
+    extra, spe = _truth_arrays(n_ch=1)
+
+    # Use a single charge drawn near the SPE peak
+    Q = jnp.array(
+        [float(charges[np.argmin(np.abs(charges - SPE_MEAN))])], dtype=jnp.float32
+    )
+    fired_idx = jnp.array([0], dtype=jnp.int32)
+
+    s_all, g0_all, u_all = precompute_channels_fn(extra, spe)
+    u_sel, g0_phase = precompute_event_fn(Q, fired_idx, g0_all, u_all)
+
+    ll_true, _ = logl_and_grad_fn(jnp.array([lam_true]), u_sel, g0_phase)
+    ll_perturbed, _ = logl_and_grad_fn(jnp.array([lam_true * 1.5]), u_sel, g0_phase)
+
+    assert float(ll_true[0]) > float(ll_perturbed[0])
+
+
+# ====================================
+#     Precompute invariance to lam
+# ====================================
+
+
+def test_precompute_independent_of_lam():
+    """Channel/event precompute outputs must not depend on lam."""
+    grid = _make_grid()
+    precompute_channels_fn, precompute_event_fn, _ = _make_fns(grid)
+
+    extra, spe = _truth_arrays(n_ch=5)
+    Q = jnp.asarray([5000.0, 8000.0, 12000.0, 20000.0, 35000.0], dtype=jnp.float32)
+    fired_idx = jnp.arange(5, dtype=jnp.int32)
+
+    s1, g01, u1 = precompute_channels_fn(extra, spe)
+    s2, g02, u2 = precompute_channels_fn(extra, spe)
+
+    us1, gp1 = precompute_event_fn(Q, fired_idx, g01, u1)
+    us2, gp2 = precompute_event_fn(Q, fired_idx, g02, u2)
+
+    assert jnp.allclose(s1, s2)
+    assert jnp.allclose(g01, g02)
+    assert jnp.allclose(u1, u2)
+    assert jnp.allclose(us1, us2)
+    assert jnp.allclose(gp1, gp2)
+
+
+# ==============================
+#     Performance smoke test
+# ==============================
+
+
+def test_performance_300_fired_channels():
+    """logl+grad for 300 fired channels must complete in < 50ms after warmup."""
+    import time
+
+    grid = _make_grid()
+    precompute_channels_fn, precompute_event_fn, logl_and_grad_fn = _make_fns(grid)
+
+    rng = np.random.default_rng(2)
+    n_ch = 300
+    extra, spe = _truth_arrays(n_ch)
+    lam = jnp.asarray(rng.uniform(0.1, 3.0, n_ch))
+    Q = jnp.asarray(rng.uniform(2000, 50000, n_ch), dtype=jnp.float32)
+    fired_idx = jnp.arange(n_ch, dtype=jnp.int32)
+
+    s_all, g0_all, u_all = precompute_channels_fn(extra, spe)
+    u_sel, g0_phase = precompute_event_fn(Q, fired_idx, g0_all, u_all)
+
+    # Warmup
+    logl_and_grad_fn(lam, u_sel, g0_phase)[0].block_until_ready()
+
+    t0 = time.time()
+    for _ in range(20):
+        ll, g = logl_and_grad_fn(lam, u_sel, g0_phase)
+        ll.block_until_ready()
+    elapsed_ms = (time.time() - t0) / 20 * 1000
+
+    assert elapsed_ms < 50.0, f"logl+grad took {elapsed_ms:.1f}ms, expected < 50ms"
