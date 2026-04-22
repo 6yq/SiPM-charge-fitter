@@ -331,11 +331,21 @@ def make_lam_logl(freq, dq, N, ft_extra, ser_ft, count_pgf):
 
         Both numerator and denominator share the same exponential matrix, so the
         gradient costs no extra FFT — one matrix product computes both.
+
+        Notes
+        -----
+        Cast to f32 for the exp/sum hot path; boundary values stay f64.
+        Working set halves (225 MB → 112 MB for n_fired~3400, N_FFT=2048),
+        giving ~1.5-2x speedup on the memory-bandwidth-bound exp+sum.
         """
-        expo = jnp.exp(lam[:, None] * u_sel)  # (n_fired, N)
-        wt = expo * g0_phase  # (n_fired, N)
-        G_val = jnp.real(jnp.sum(wt, axis=1)) / L  # (n_fired,)
-        dG = jnp.real(jnp.sum(u_sel * wt, axis=1)) / L  # (n_fired,)
+        lam32 = lam.astype(jnp.float32)
+        u32 = u_sel.astype(jnp.complex64)
+        g32 = g0_phase.astype(jnp.complex64)
+
+        expo = jnp.exp(lam32[:, None] * u32)  # (n_fired, N) complex64
+        wt = expo * g32  # (n_fired, N) complex64
+        G_val = jnp.real(jnp.sum(wt, axis=1)).astype(jnp.float64) / L
+        dG = jnp.real(jnp.sum(u32 * wt, axis=1)).astype(jnp.float64) / L
         G_safe = jnp.maximum(G_val, 1e-32)
         return jnp.log(G_safe), dG / G_safe
 
