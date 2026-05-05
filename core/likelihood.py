@@ -106,6 +106,7 @@ def make_binned_logl(grid, ft_extra, ser_ft, count_pgf, efficiency=None):
     N = len(grid.xsp)
     zero = float(grid.zero)
     log_C = float(grid.log_C)
+    zero_edges = jnp.asarray([float(grid.xsp[0]), float(grid.bins[0])])
 
     def logl(log_A, extra, spe, lam, thres=None):
         A = jnp.exp(log_A)
@@ -114,10 +115,8 @@ def make_binned_logl(grid, ft_extra, ser_ft, count_pgf, efficiency=None):
         bin_int = _bin_integrals(G_tilde, edges, freq, N, dq)
         y_est = jnp.maximum(A * bin_int, 1e-32)
 
-        # overflow = A * (total probability - probability inside window)
-        p_total = jnp.real(G_tilde[0])  # ~1 when grid covers support
-        p_window = jnp.sum(bin_int)
-        z_est = jnp.maximum(A * (p_total - p_window), 1e-32)
+        z_prob = _bin_integrals(G_tilde, zero_edges, freq, N, dq)[0]
+        z_est = jnp.maximum(A * z_prob, 1e-32)
 
         ll_bins = jnp.sum(hist * jnp.log(y_est) - y_est)
         ll_zero = zero * jnp.log(z_est) - z_est
