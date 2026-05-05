@@ -81,7 +81,7 @@ def _halley_step(w, z):
     return w - f / denom
 
 
-def _lambert_w_iterate(z, n_iter=6):
+def _lambert_w_iterate(z, n_iter=4):
     """Run a fixed number of Halley iterations.
 
     12 iterations is overkill for double precision (Halley converges cubically
@@ -91,6 +91,9 @@ def _lambert_w_iterate(z, n_iter=6):
     -----
     2026.4.8:
         Let's take 6 iterations then.
+    2026.5.5:
+        3 iterations already close enough to 12.
+        Keep 4 for safety.
     """
     z = z.astype(jnp.complex128)
     w = _initial_guess(z)
