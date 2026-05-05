@@ -1,340 +1,354 @@
 # ===========================================================================
 # core/combined.py
 #
-# Joint fitter for multiple spectra sharing one set of SER + pedestal params.
+# Joint fitter for multiple SpectrumFitter spectra sharing one set of
+# pedestal (extra) and SER (spe) parameters.
 #
-# Parameter vector layout:
-#   theta = [logA_1, ..., logA_N,        (independent, one per spectrum)
-#            extra_0, ..., extra_{S-1},   (shared pedestal, length _start_idx)
-#            spe_0,  ..., spe_{M-1},      (shared SER)
-#            lam_1,  ..., lam_N]          (independent, one per spectrum)
+# Combined parameter vector layout:
+#   theta = [log_A_0, ..., log_A_{N-1},   <- per-spectrum (N scalars)
+#            extra_0, ..., extra_{S-1},    <- shared pedestal (S scalars)
+#            spe_0,   ..., spe_{M-1},      <- shared SER     (M scalars)
+#            lam_0,   ..., lam_{N-1}]      <- per-spectrum   (N scalars)
 #
-# All individual fitters must have identical _fit_total, _start_idx, and
-# SER dimension.  Shared parameters are taken from fitters[0].
+# All fitters must share the same extra_block and spe_block dimensions.
+# Shared initial values are taken from fitters[0].
 # ===========================================================================
 
 from __future__ import annotations
 
+import jax
 import numpy as np
+import jax.numpy as jnp
+
 from typing import List
+from scipy.optimize import minimize
+from dataclasses import dataclass, field
+
+from .base import FitResult, SpectrumFitter
+
+jax.config.update("jax_enable_x64", True)
+
+
+# ==============================
+#     Combined fit result
+# ==============================
+
+
+@dataclass
+class CombinedFitResult:
+    converged: bool
+    theta: np.ndarray  # combined vector, length 2N + S + M
+    theta_err: np.ndarray
+    logl: float
+    n_iter: int
+    message: str
+    # slices / indices into theta for downstream use
+    logA_sl: List[int]  # indices of log_A_i
+    extra_sl: slice  # shared extra
+    spe_sl: slice  # shared SER
+    lam_sl: List[int]  # indices of lam_i
+
+    def log_As(self):
+        return self.theta[self.logA_sl], self.theta_err[self.logA_sl]
+
+    def extra(self):
+        return self.theta[self.extra_sl], self.theta_err[self.extra_sl]
+
+    def spe(self):
+        return self.theta[self.spe_sl], self.theta_err[self.spe_sl]
+
+    def lams(self):
+        return self.theta[self.lam_sl], self.theta_err[self.lam_sl]
+
+    def local_theta(self, i, layout):
+        """Reconstruct the i-th fitter's individual theta from combined theta."""
+        return np.concatenate(
+            [
+                self.theta[self.logA_sl[i] : self.logA_sl[i] + 1],
+                self.theta[self.extra_sl],
+                self.theta[self.spe_sl],
+                self.theta[self.lam_sl[i] : self.lam_sl[i] + 1],
+            ]
+        )
+
+
+# ==============================
+#     CombinedFitter
+# ==============================
 
 
 class CombinedFitter:
-    """Combine multiple spectra into a joint fit with shared SER + pedestal.
+    """Joint MLE for multiple spectra with shared extra + SER parameters.
 
     Parameters
     ----------
-    fitters : list of PMT_Fitter
-        Individual fitters, each already constructed with hist/bins/A/q_min.
-        Must all have the same _fit_total, _start_idx, and SER dimension.
+    fitters : list of SpectrumFitter
+        Each fitter must be constructed (with Q_raw, grid, likelihood closure)
+        before being passed here.  All fitters must have the same extra_block
+        and spe_block dimensions; shared init values are taken from fitters[0].
     """
 
-    def __init__(self, fitters: List[object], ref_index: int = 0):
+    def __init__(self, fitters: List[SpectrumFitter]):
         if not fitters:
-            raise ValueError("At least one fitter is required.")
-        if not (0 <= ref_index < len(fitters)):
-            raise ValueError(
-                f"ref_index={ref_index} out of range for {len(fitters)} fitters."
-            )
-
+            raise ValueError("At least one fitter required.")
         self.fitters = fitters
         self.n_spectra = len(fitters)
-        self._ref_index = ref_index
-
-        self._validate_fitters()
-        self._build_parameter_structure()
-
-        print(f"\n[INFO] Combined {self.n_spectra} spectra", flush=True)
-        print(f"[INFO] Total parameters: {self.dof}", flush=True)
+        self._validate()
+        self._build()
 
     # ==============================
     #     Validation
     # ==============================
 
-    def _validate_fitters(self):
-        ref = self.fitters[self._ref_index]
-        ref_head = 1 if ref._fit_total else 0
-        ref_ser_dim = len(ref.init) - ref_head - ref._start_idx - 1
-
-        for i, f in enumerate(self.fitters):
-            if i == self._ref_index:
-                continue
-            if f._fit_total != ref._fit_total:
+    def _validate(self):
+        ref = self.fitters[0]
+        n_extra = len(ref.extra_block.init)
+        n_spe = len(ref.spe_block.init)
+        for i, f in enumerate(self.fitters[1:], 1):
+            if len(f.extra_block.init) != n_extra:
                 raise ValueError(
-                    f"Fitter {i}: fit_total={f._fit_total}, expected {ref._fit_total}"
+                    f"Fitter {i}: extra_block dim {len(f.extra_block.init)}, "
+                    f"expected {n_extra}."
                 )
-            if f._start_idx != ref._start_idx:
+            if len(f.spe_block.init) != n_spe:
                 raise ValueError(
-                    f"Fitter {i}: _start_idx={f._start_idx}, expected {ref._start_idx}"
-                )
-            head = 1 if f._fit_total else 0
-            ser_dim = len(f.init) - head - f._start_idx - 1
-            if ser_dim != ref_ser_dim:
-                raise ValueError(
-                    f"Fitter {i}: SER dimension={ser_dim}, expected {ref_ser_dim}"
+                    f"Fitter {i}: spe_block dim {len(f.spe_block.init)}, "
+                    f"expected {n_spe}."
                 )
 
     # ==============================
     #     Parameter structure
     # ==============================
 
-    def _build_parameter_structure(self):
-        ref = self.fitters[self._ref_index]
+    def _build(self):
+        ref = self.fitters[0]
+        n = self.n_spectra
+        n_extra = len(ref.extra_block.init)
+        n_spe = len(ref.spe_block.init)
 
-        self._fit_total = ref._fit_total
-        self._start_idx = ref._start_idx
-        self._head = 1 if self._fit_total else 0
+        # cursor in combined theta
+        # [log_A_0..N-1 | extra | spe | lam_0..N-1]
+        self.logA_sl = list(range(n))
+        self.extra_sl = slice(n, n + n_extra)
+        self.spe_sl = slice(n + n_extra, n + n_extra + n_spe)
+        self.lam_sl = list(range(n + n_extra + n_spe, 2 * n + n_extra + n_spe))
+
+        ly = ref.layout  # {"log_A": slice, "extra": slice, "spe": slice, "lam": slice}
 
         init_parts = []
         bounds_parts = []
-        cursor = 0
 
-        # --- logA: independent per spectrum ---
-        if self._fit_total:
-            self._logA_indices = []
-            for f in self.fitters:
-                init_parts.append(np.array([f.init[0]]))
-                bounds_parts.append(f.bounds[0])
-                self._logA_indices.append(cursor)
-                cursor += 1
-        else:
-            self._logA_indices = []
-
-        # --- shared extra (pedestal) params ---
-        if self._start_idx > 0:
-            extra_slice = slice(self._head, self._head + self._start_idx)
-            init_parts.append(ref.init[extra_slice])
-            bounds_parts.extend(ref.bounds[extra_slice])
-            self._extra_slice = slice(cursor, cursor + self._start_idx)
-            cursor += self._start_idx
-        else:
-            self._extra_slice = slice(0, 0)
-
-        # --- shared SER params ---
-        ser_start = self._head + self._start_idx
-        ser_end = len(ref.init) - 1  # last element is lam
-        self._ser_len = ser_end - ser_start
-        init_parts.append(ref.init[ser_start:ser_end])
-        bounds_parts.extend(ref.bounds[ser_start:ser_end])
-        self._ser_slice = slice(cursor, cursor + self._ser_len)
-        cursor += self._ser_len
-
-        # --- lam: independent per spectrum ---
-        self._lam_indices = []
         for f in self.fitters:
-            init_parts.append(np.array([f.init[-1]]))
-            bounds_parts.append(f.bounds[-1])
-            self._lam_indices.append(cursor)
-            cursor += 1
+            init_parts.append(f.init[ly["log_A"]])
+            bounds_parts.extend(f.bounds[ly["log_A"].start : ly["log_A"].stop])
+
+        init_parts.append(ref.init[ly["extra"]])
+        bounds_parts.extend(ref.bounds[ly["extra"].start : ly["extra"].stop])
+
+        init_parts.append(ref.init[ly["spe"]])
+        bounds_parts.extend(ref.bounds[ly["spe"].start : ly["spe"].stop])
+
+        for f in self.fitters:
+            init_parts.append(f.init[ly["lam"]])
+            bounds_parts.extend(f.bounds[ly["lam"].start : ly["lam"].stop])
 
         self.init = np.concatenate(init_parts)
-        self.bounds = tuple(bounds_parts)
+        self.bounds = bounds_parts
         self.dof = len(self.init)
-
-        # Remap constraints from ref fitter local SER indices → combined indices
-        self.constraints = self._remap_constraints(ref.constraints)
-
-    def _remap_constraints(self, constraints):
-        """Remap constraint indices from local SER space to combined space."""
-        if not constraints:
-            return []
-
-        local_ser_start = self._head + self._start_idx
-        combined_ser_start = self._ser_slice.start
-        offset = combined_ser_start - local_ser_start
-
-        remapped = []
-        for c in constraints:
-            if isinstance(c, dict):
-                nc = c.copy()
-                nc["coeffs"] = [(idx + offset, coeff) for idx, coeff in c["coeffs"]]
-                remapped.append(nc)
-            else:
-                raise ValueError(f"Unknown constraint format: {c}")
-        return remapped
+        self._layout_ref = ly  # single-fitter layout, kept for local_theta
 
     # ==============================
-    #     Local arg builder
+    #     Local theta reconstruction
     # ==============================
 
-    def _build_local_args(self, theta: np.ndarray, i: int) -> np.ndarray:
-        """Reconstruct the individual fitter's full parameter vector from theta."""
-        parts = []
+    def local_theta(self, theta: np.ndarray, i: int) -> np.ndarray:
+        """Return individual fitter i's theta from combined theta (numpy)."""
+        return np.concatenate(
+            [
+                theta[self.logA_sl[i] : self.logA_sl[i] + 1],
+                theta[self.extra_sl],
+                theta[self.spe_sl],
+                theta[self.lam_sl[i] : self.lam_sl[i] + 1],
+            ]
+        )
 
-        # logA (individual)
-        if self._fit_total:
-            parts.append(theta[self._logA_indices[i] : self._logA_indices[i] + 1])
-
-        # shared extra (pedestal)
-        if self._start_idx > 0:
-            parts.append(theta[self._extra_slice])
-
-        # shared SER
-        parts.append(theta[self._ser_slice])
-
-        # lam (individual)
-        parts.append(theta[self._lam_indices[i] : self._lam_indices[i] + 1])
-
-        return np.concatenate(parts)
+    def local_theta_jax(self, theta: jnp.ndarray, i: int) -> jnp.ndarray:
+        """Return individual fitter i's theta from combined theta (JAX array)."""
+        return jnp.concatenate(
+            [
+                theta[self.logA_sl[i] : self.logA_sl[i] + 1],
+                theta[self.extra_sl],
+                theta[self.spe_sl],
+                theta[self.lam_sl[i] : self.lam_sl[i] + 1],
+            ]
+        )
 
     # ==============================
-    #     Likelihood
+    #     Joint log-likelihood
     # ==============================
 
-    def log_l(self, theta: np.ndarray) -> float:
-        """Joint log-likelihood = sum of individual log-likelihoods."""
-        total = 0.0
+    def _logl_combined(self, theta: jnp.ndarray) -> jnp.ndarray:
+        """JAX-traceable joint log-L (sum over fitters)."""
+        total = jnp.zeros(())
         for i, f in enumerate(self.fitters):
-            ll = f.log_l(self._build_local_args(theta, i))
-            if not np.isfinite(ll):
-                return -np.inf
-            total += ll
+            total = total + f._logl_from_theta(self.local_theta_jax(theta, i))
         return total
 
     # ==============================
-    #     Fitting
+    #     MLE
     # ==============================
 
-    def fit(self, strategy=1, tol=1e-1, max_calls=10000, print_level=0):
-        """Fit with Minuit (pyROOT backend)."""
-        import ROOT
+    def fit_mle(
+        self, theta0: np.ndarray = None, maxiter: int = 1000
+    ) -> CombinedFitResult:
+        """Joint L-BFGS-B MLE with shared extra + SER.
 
-        ROOT.gErrorIgnoreLevel = ROOT.kError
+        The gradient is assembled analytically from each fitter's individual
+        gradient, avoiding a full combined Hessian at optimisation time.
 
-        def _nll(par_ptr):
-            args = np.array([par_ptr[i] for i in range(self.dof)], dtype=float)
-            ll = self.log_l(args)
-            return 1e30 if not np.isfinite(ll) else -ll
+        Parameters
+        ----------
+        theta0  : initial combined parameter vector (default: self.init)
+        maxiter : L-BFGS-B iteration cap
+        """
+        if theta0 is None:
+            theta0 = self.init.copy()
+        theta0 = np.asarray(theta0, dtype=np.float64)
 
-        self._nll = _nll
-        fcn = ROOT.Math.Functor(self._nll, self.dof)
+        # JIT warm-up so the first optimiser call is not penalised
+        _th0_jax = jnp.asarray(theta0)
+        for i, f in enumerate(self.fitters):
+            f._logl_jit(self.local_theta_jax(_th0_jax, i))
+            f._grad_jit(self.local_theta_jax(_th0_jax, i))
 
-        def _setup(m, strat, this_tol):
-            m.SetFunction(fcn)
-            m.SetStrategy(strat)
-            m.SetErrorDef(0.5)
-            m.SetTolerance(this_tol)
-            m.SetMaxFunctionCalls(max_calls)
-            m.SetPrintLevel(print_level)
-            for i, (v0, (lo, hi)) in enumerate(zip(self.init, self.bounds)):
-                step = 0.1 * (abs(float(v0)) or 1.0)
-                if lo is None and hi is None:
-                    m.SetVariable(i, f"p{i}", float(v0), step)
-                elif lo is not None and hi is not None:
-                    m.SetLimitedVariable(i, f"p{i}", float(v0), step, lo, hi)
-                elif lo is not None:
-                    m.SetLowerLimitedVariable(i, f"p{i}", float(v0), step, lo)
-                else:
-                    m.SetUpperLimitedVariable(i, f"p{i}", float(v0), step, hi)
+        logl_init = float(self._logl_combined(_th0_jax))
 
-        algos = ["Migrad", "Combined", "Migrad", "Combined", "Migrad", "Combined"]
-        for attempt, algo in enumerate(algos):
-            this_tol = tol if attempt < 2 else min(10 * tol, 1.0)
-            this_strat = (3 - strategy) if attempt >= 4 else strategy
-            m = ROOT.Math.Factory.CreateMinimizer("Minuit2", algo)
-            _setup(m, this_strat, this_tol)
-            if m.Minimize():
-                break
-            print(f"[WARN] Minuit attempt {attempt + 1} failed", flush=True)
-        else:
-            print("[WARN] Minuit did not converge after 6 attempts", flush=True)
+        # Gradient assembled per-fitter to avoid retracing the full combined fn
+        def neg_logl(x: np.ndarray) -> float:
+            xj = jnp.asarray(x)
+            total = 0.0
+            for i, f in enumerate(self.fitters):
+                total += float(f._logl_jit(self.local_theta_jax(xj, i)))
+            return -total
 
-        m.Hesse()
-        self.converged = m.Status() == 0
+        def neg_grad(x: np.ndarray) -> np.ndarray:
+            xj = jnp.asarray(x)
+            g = np.zeros_like(x)
+            ly = self._layout_ref
+            for i, f in enumerate(self.fitters):
+                lg = np.asarray(f._grad_jit(self.local_theta_jax(xj, i)))
+                g[self.logA_sl[i]] += lg[ly["log_A"].start]
+                g[self.extra_sl] += lg[ly["extra"]]
+                g[self.spe_sl] += lg[ly["spe"]]
+                g[self.lam_sl[i]] += lg[ly["lam"].start]
+            return -g
 
-        fitted = np.array([m.X()[i] for i in range(self.dof)])
-        errors = np.array([m.Errors()[i] for i in range(self.dof)])
-
-        self._store_results(fitted, errors, -m.MinValue())
-        self._minimizer = m
-
-    # ==============================
-    #     Result storage
-    # ==============================
-
-    def _store_results(self, fitted, errors, likelihood):
-        self.fitted_params = fitted
-        self.param_errors = errors
-        self.likelihood = likelihood
-
-        # shared extra (pedestal)
-        self.extra_args = fitted[self._extra_slice]
-        self.extra_args_std = errors[self._extra_slice]
-
-        # shared SER
-        self.ser_args = fitted[self._ser_slice]
-        self.ser_args_std = errors[self._ser_slice]
-
-        # per-spectrum lam
-        self.lams = fitted[self._lam_indices]
-        self.lams_std = errors[self._lam_indices]
-
-        # per-spectrum logA (if fit_total)
-        if self._fit_total:
-            self.logAs = fitted[self._logA_indices]
-            self.logAs_std = errors[self._logA_indices]
-
-        # info criteria
-        n_data = sum(len(f.hist) + 1 for f in self.fitters)
-        self.aic = 2 * self.dof - 2 * self.likelihood
-        self.bic = self.dof * np.log(n_data) - 2 * self.likelihood
-
-        # correlation of shared SER block
-        s = self._ser_slice
-        self.spe_corr = (
-            np.array(
-                [
-                    [self._minimizer.Correlation(i, j) for j in range(s.start, s.stop)]
-                    for i in range(s.start, s.stop)
-                ]
-            )
-            if hasattr(self, "_minimizer")
-            else None
+        res = minimize(
+            neg_logl,
+            theta0,
+            jac=neg_grad,
+            method="L-BFGS-B",
+            bounds=self.bounds,
+            options={"maxiter": maxiter},
         )
 
-        # gains via fitters[0]
-        ref = self.fitters[self._ref_index]
-        self.gps = ref.get_gain(self.ser_args, "gp")
-        self.gms = ref.get_gain(self.ser_args, "gm")
+        theta_hat = np.asarray(res.x, dtype=np.float64)
+        logl_final = -float(res.fun)
 
-        self._print_results()
+        if logl_final < logl_init - 1.0:
+            import warnings
 
-    def _print_results(self):
-        print(f"\n[INFO] Converged : {self.converged}", flush=True)
-        print(f"[INFO] Log-L     : {self.likelihood:.4f}", flush=True)
-        print(f"[INFO] AIC       : {self.aic:.4f}", flush=True)
-        print(f"[INFO] BIC       : {self.bic:.4f}", flush=True)
+            warnings.warn(
+                f"Combined fit ended worse than init "
+                f"(logl {logl_final:.2f} < init {logl_init:.2f}); "
+                "result may be unreliable."
+            )
 
-        def _fmt(name, v, e, lo, hi):
-            at = ""
-            if lo is not None and abs(v - lo) < 1e-6 * (abs(lo) or 1):
-                at = "  [AT LOWER BOUND]"
-            elif hi is not None and abs(v - hi) < 1e-6 * (abs(hi) or 1):
-                at = "  [AT UPPER BOUND]"
-            print(f"[INFO] {name}: {v:.4g} ± {e:.4g}{at}", flush=True)
+        self._print_result(theta_hat, logl_init, logl_final, res)
+        theta_err = self._hessian_errors(theta_hat)
 
-        bounds_list = list(self.bounds)
-        if self._start_idx > 0:
-            names = self.fitters[0].extra_param_names()
-            print("[INFO] Shared pedestal:", flush=True)
-            for i, (name, v, e) in enumerate(
-                zip(names, self.extra_args, self.extra_args_std)
-            ):
-                lo, hi = bounds_list[self._extra_slice.start + i]
-                _fmt(f"  {name}", v, e, lo, hi)
+        return CombinedFitResult(
+            converged=bool(res.success),
+            theta=theta_hat,
+            theta_err=theta_err,
+            logl=logl_final,
+            n_iter=int(res.nit),
+            message=str(res.message),
+            logA_sl=self.logA_sl,
+            extra_sl=self.extra_sl,
+            spe_sl=self.spe_sl,
+            lam_sl=self.lam_sl,
+        )
 
-        print("[INFO] Shared SER:", flush=True)
-        for i, (v, e) in enumerate(zip(self.ser_args, self.ser_args_std)):
-            lo, hi = bounds_list[self._ser_slice.start + i]
-            _fmt(f"  spe[{i}]", v, e, lo, hi)
+    @staticmethod
+    def _at_bound(v, lo, hi, rtol=1e-4):
+        if lo is not None and abs(v - lo) <= rtol * (abs(lo) + 1):
+            return " [AT LOWER]"
+        if hi is not None and abs(v - hi) <= rtol * (abs(hi) + 1):
+            return " [AT UPPER]"
+        return ""
 
-        print("[INFO] Per-spectrum lam:", flush=True)
-        for i, (v, e) in enumerate(zip(self.lams, self.lams_std)):
-            lo, hi = bounds_list[self._lam_indices[i]]
-            _fmt(f"  spectrum {i}", v, e, lo, hi)
+    def _print_result(self, theta, logl_init, logl_final, res):
+        print(
+            f"[COMB] logl  init={logl_init:.4g}  final={logl_final:.4g}"
+            f"  nit={res.nit}  {res.message}",
+            flush=True,
+        )
+        # shared extra
+        for j, name in enumerate(self.fitters[0].extra_block.names):
+            idx = self.extra_sl.start + j
+            v = theta[idx]
+            lo, hi = self.bounds[idx]
+            print(
+                f"  extra  {name:20s} = {v:.6g}  [{lo}, {hi}]"
+                f"{self._at_bound(v, lo, hi)}",
+                flush=True,
+            )
+        # shared spe — also print physical mean/sigma for GenTweedieFitter
+        spe_theta = theta[self.spe_sl]
+        spe_names = self.fitters[0].spe_block.names
+        for j, name in enumerate(spe_names):
+            idx = self.spe_sl.start + j
+            v = theta[idx]
+            lo, hi = self.bounds[idx]
+            print(
+                f"  spe    {name:20s} = {v:.6g}  [{lo}, {hi}]"
+                f"{self._at_bound(v, lo, hi)}",
+                flush=True,
+            )
+        # physical SPE mean/sigma if the fitter exposes spe_report
+        try:
+            report = self.fitters[0].spe_report(spe_theta)
+            print(
+                f"  spe    {'spe_mean (phys)':20s} = {report['spe_mean']:.6g}",
+                flush=True,
+            )
+            print(
+                f"  spe    {'spe_sigma (phys)':20s} = {report['spe_sigma']:.6g}",
+                flush=True,
+            )
+        except Exception:
+            pass
+        # per-spectrum log_A and lam
+        for i in range(self.n_spectra):
+            logA = theta[self.logA_sl[i]]
+            lam = theta[self.lam_sl[i]]
+            lo_A, hi_A = self.bounds[self.logA_sl[i]]
+            lo_lam, hi_lam = self.bounds[self.lam_sl[i]]
+            print(
+                f"  spec {i:2d}  log_A={logA:.6g}  [{lo_A:.4g}, {hi_A:.4g}]"
+                f"{self._at_bound(logA, lo_A, hi_A)}"
+                f"  lam={lam:.6g}  [{lo_lam}, {hi_lam}]"
+                f"{self._at_bound(lam, lo_lam, hi_lam)}",
+                flush=True,
+            )
 
-        if self._fit_total:
-            print("[INFO] Per-spectrum logA:", flush=True)
-            for i, (v, e) in enumerate(zip(self.logAs, self.logAs_std)):
-                lo, hi = bounds_list[self._logA_indices[i]]
-                _fmt(f"  spectrum {i}", v, e, lo, hi)
+    def _hessian_errors(self, theta_hat: np.ndarray) -> np.ndarray:
+        _logl_jit_combined = jax.jit(self._logl_combined)
+        H = np.asarray(
+            jax.hessian(_logl_jit_combined)(jnp.asarray(theta_hat, dtype=jnp.float64))
+        )
+        cov = -np.linalg.inv(H)
+        diag = np.diag(cov)
+        diag = np.where(diag > 0, diag, np.nan)
+        return np.sqrt(diag)
