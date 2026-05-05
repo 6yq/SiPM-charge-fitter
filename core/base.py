@@ -130,7 +130,10 @@ class SpectrumFitter:
 
         if lam_init is None:
             occ_est = min(float(hist.sum()) / max(_A, 1), 1.0 - 1e-9)
-            lam_init = -log(1.0 - occ_est)
+            lam_init_hat = -log(1.0 - occ_est)
+            lam_init = lam_init_hat - (np.exp(lam_init_hat) - 1) / (2 * _A)
+            # a bit lower init somewhat helps with the converging
+            lam_init *= 0.95
 
         self.Q_raw = Q_raw
         self.hist = hist
