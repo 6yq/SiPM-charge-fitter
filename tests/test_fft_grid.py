@@ -41,18 +41,6 @@ def test_grid_covers_q_max():
     assert grid.xsp[-1] >= 80000.0 - grid.xsp_width
 
 
-# ===========================
-#     Power-of-two length
-# ===========================
-
-
-def test_length_is_power_of_two():
-    hist, bins = _make_hist()
-    grid = build_grid(hist, bins, A=int(hist.sum()), q_min=-5000.0)
-    N = len(grid.xsp)
-    assert N & (N - 1) == 0, f"N={N} is not a power of 2"
-
-
 # =======================
 #     Uniform spacing
 # =======================

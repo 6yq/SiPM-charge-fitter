@@ -50,10 +50,6 @@ class FFTGrid:
 # ==============================
 
 
-def _next_pow2(n):
-    return 1 << (n - 1).bit_length()
-
-
 def build_grid(
     hist,
     bins,
@@ -107,12 +103,9 @@ def build_grid(
     #     Power-of-two length
     # ==============================
     span = q_max - q_min
-    n_min = int(np.ceil(span / dq)) + 1
-    N = _next_pow2(n_min)
-    # adjust q_max upward to fit exactly
-    q_max_adj = q_min + (N - 1) * dq
+    N = int(np.ceil(span / dq)) + 1
 
-    xsp = np.linspace(q_min, q_max_adj, num=N, endpoint=True)
+    xsp = np.linspace(q_min, q_min + (N - 1) * dq, num=N, endpoint=True)
     i_zero = int(round(-q_min / dq))
     # snap xsp so that xsp[i_zero] is exactly 0.0
     xsp = xsp - xsp[i_zero]
