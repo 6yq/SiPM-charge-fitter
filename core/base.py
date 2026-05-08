@@ -116,6 +116,7 @@ class SpectrumFitter:
         spe_block: ParamBlock = None,
         lam_init: float = None,
         lam_bounds=(1e-6, 1e2),
+        lam_dc: float = 0.0,
         log_A_err: float = 0.05,
         mode: str = "unbinned",
     ):
@@ -131,10 +132,13 @@ class SpectrumFitter:
         if lam_init is None:
             occ_est = min(float(hist.sum()) / max(_A, 1), 1.0 - 1e-9)
             lam_init_hat = -log(1.0 - occ_est)
-            lam_init = lam_init_hat - (np.exp(lam_init_hat) - 1) / (2 * _A)
+            lam_init_ = lam_init_hat - (np.exp(lam_init_hat) - 1) / (2 * _A)
             # a bit lower init somewhat helps with the converging
-            lam_init *= 0.95
+            lam_init_ *= 0.95
+        else:
+            lam_init_ = float(lam_init)
 
+        self.lam_dc = float(lam_dc)
         self.Q_raw = Q_raw
         self.hist = hist
         self.bins = bin_edges
@@ -153,7 +157,7 @@ class SpectrumFitter:
             np.array([log_A_init]),
             np.asarray(self.extra_block.init, dtype=float),
             np.asarray(self.spe_block.init, dtype=float),
-            np.array([float(lam_init)]),
+            np.array([max(lam_init_ - self.lam_dc, 1e-3)]),
         ]
         bounds_parts = [
             [(log_A_init * (1 - log_A_err), log_A_init * (1 + log_A_err))],
@@ -207,12 +211,11 @@ class SpectrumFitter:
     # ==============================
 
     def _unpack(self, theta):
-        return (
-            theta[self.layout["log_A"].start],
-            theta[self.layout["extra"]],
-            theta[self.layout["spe"]],
-            theta[self.layout["lam"].start],
-        )
+        log_A = theta[self.layout["log_A"]]
+        extra = theta[self.layout["extra"]]
+        spe   = theta[self.layout["spe"]]
+        lam   = theta[self.layout["lam"]] + self.lam_dc
+        return log_A, extra, spe, lam
 
     def _logl_from_theta(self, theta):
         log_A, extra, spe, lam = self._unpack(theta)
