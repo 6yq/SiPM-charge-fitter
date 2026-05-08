@@ -354,3 +354,6 @@ class SpectrumFitter:
 
     def spe_report(self, spe_args) -> dict:
         raise NotImplementedError
+
+    def spe_print(self, spe_args):
+        raise NotImplementedError

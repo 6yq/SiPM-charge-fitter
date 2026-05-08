@@ -316,17 +316,9 @@ class CombinedFitter:
                 f"{self._at_bound(v, lo, hi)}",
                 flush=True,
             )
-        # physical SPE mean/sigma if the fitter exposes spe_report
+        # physical SPE parameters if the fitter exposes spe_print
         try:
-            report = self.fitters[0].spe_report(spe_theta)
-            print(
-                f"  spe    {'spe_mean (phys)':20s} = {report['spe_mean']:.6g}",
-                flush=True,
-            )
-            print(
-                f"  spe    {'spe_sigma (phys)':20s} = {report['spe_sigma']:.6g}",
-                flush=True,
-            )
+            report = self.fitters[0].spe_print(spe_theta)
         except Exception:
             pass
         # per-spectrum log_A and lam

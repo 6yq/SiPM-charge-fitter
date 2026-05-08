@@ -174,8 +174,11 @@ class GenTweedieFitter(SpectrumFitter):
         return {
             "spe_mean": mean,
             "spe_sigma": sigma,
-            "spe_res": sigma / mean,
             "xi": xi,
-            "a": a,
-            "b": b,
         }
+
+    def spe_print(self, spe_args):
+        r = self.spe_report(spe_args)
+        print(f"  spe    {'spe_mean':20s} = {r['spe_mean']:.6g}", flush=True)
+        print(f"  spe    {'spe_sigma':20s} = {r['spe_sigma']:.6g}", flush=True)
+        print(f"  spe    {'xi':20s} = {r['xi']:.6g}", flush=True)

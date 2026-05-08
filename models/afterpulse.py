@@ -153,16 +153,18 @@ class NegBinAPFitter(GenTweedieFitter):
         mean = sigma + float(np.exp(b))
         rho = float(jax.nn.sigmoid(float(spe_args[3])))
         Q_ap = float(np.exp(spe_args[4]))
-        mean_ap = rho / (1.0 - rho)
         return {
             "spe_mean": mean,
             "spe_sigma": sigma,
-            "spe_res": sigma / mean,
             "xi": xi,
             "rho": rho,
             "Q_ap": Q_ap,
-            "mean_ap": mean_ap,
-            "total_mean": mean + mean_ap * Q_ap,
-            "a": a,
-            "b": b,
         }
+
+    def spe_print(self, spe_args):
+        r = self.spe_report(spe_args)
+        print(f"  spe    {'spe_mean':20s} = {r['spe_mean']:.6g}", flush=True)
+        print(f"  spe    {'spe_sigma':20s} = {r['spe_sigma']:.6g}", flush=True)
+        print(f"  spe    {'xi':20s} = {r['xi']:.6g}", flush=True)
+        print(f"  spe    {'rho':20s} = {r['rho']:.6g}", flush=True)
+        print(f"  spe    {'Q_ap':20s} = {r['Q_ap']:.6g}", flush=True)
