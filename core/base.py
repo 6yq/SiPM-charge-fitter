@@ -17,13 +17,13 @@
 
 from __future__ import annotations
 
-import numpy as np
 import jax
+import numpy as np
 import jax.numpy as jnp
 
-from dataclasses import dataclass, field
 from math import log
 from scipy.optimize import minimize
+from dataclasses import dataclass, field
 
 from .fft_grid import build_grid, FFTGrid
 from .likelihood import (
@@ -211,10 +211,10 @@ class SpectrumFitter:
     # ==============================
 
     def _unpack(self, theta):
-        log_A = theta[self.layout["log_A"]]
+        log_A = theta[self.layout["log_A"].start]
         extra = theta[self.layout["extra"]]
-        spe   = theta[self.layout["spe"]]
-        lam   = theta[self.layout["lam"]] + self.lam_dc
+        spe = theta[self.layout["spe"]]
+        lam = theta[self.layout["lam"].start] + self.lam_dc
         return log_A, extra, spe, lam
 
     def _logl_from_theta(self, theta):
