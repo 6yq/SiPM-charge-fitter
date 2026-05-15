@@ -318,7 +318,7 @@ def make_lam_logl(freq, dq, N, ft_extra, ser_ft, count_pgf):
         g0_sel = g0_all[fired_idx]  # (n_fired, N)
         u_sel = u_all[fired_idx]  # (n_fired, N)
         phase = jnp.exp(1j * jnp.outer(Q.astype(jnp.float64), freq_j))  # (n_fired, N)
-        return u_sel, g0_sel * phase
+        return u_sel.astype(jnp.complex64), (g0_sel * phase).astype(jnp.complex64)
 
     def logl_and_grad_fn(lam, u_sel, g0_phase):
         """Analytic logl and gradient w.r.t. lam for fired channels.
