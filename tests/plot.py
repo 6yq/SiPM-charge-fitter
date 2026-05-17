@@ -2,6 +2,7 @@ import math
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.font_manager import FontProperties
 
 from math import exp, factorial
 
@@ -160,7 +161,7 @@ def plot_histogram_with_fit(
         mu = -math.log1p(-occ)
         mu_std = occ_std / (1.0 - occ)
         occ_str = (
-            rf"$({mu/10**exp_:.3f}\pm{mu_std/10**exp_:.3f})$" rf"$\times10^{exp_}$"
+            rf"({mu/10**exp_:.3f}\pm{mu_std/10**exp_:.3f})\times10^{{{exp_}}}"
         )
     elif occ is not None:
         mu = -math.log1p(-occ)
@@ -248,6 +249,10 @@ def plot_histogram_with_fit(
         ax_main.set_title(f"channel id {ch}")
 
     fs_scale = 0.75
+    legend_fontsize = (
+        FontProperties(size=plt.rcParams["legend.fontsize"]).get_size_in_points()
+        * fs_scale
+    )
     ax_main.legend(
         frameon=False,
         loc="upper right",
@@ -255,7 +260,7 @@ def plot_histogram_with_fit(
         labelspacing=0.4,
         handlelength=2.2,
         borderaxespad=0.2,
-        prop={"size": plt.rcParams["legend.fontsize"] * fs_scale},
+        prop={"size": legend_fontsize},
     )
 
     if comp_handles:
@@ -271,7 +276,7 @@ def plot_histogram_with_fit(
             handlelength=2.0,
             handletextpad=0.5,
             borderaxespad=0.0,
-            prop={"size": plt.rcParams["legend.fontsize"] * fs_scale},
+            prop={"size": legend_fontsize},
         )
 
     # ==============================
