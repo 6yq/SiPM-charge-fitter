@@ -403,10 +403,21 @@ class NegBinBetaAPFitter(NegBinAPFitter):
     The Beta shape a=2 is the early-recovery suppression f(Q) ~ Q.  The fitted
     mean fixes b, so the model adds no extra weakly identified AP parameter on
     top of rho and beta.
+
+    Optional dark-count term
+    ------------------------
+    Pass ``dark_ft`` (from ``fitter.models.dark_count.make_dark_ft``) and a
+    matching ``dark_block`` (from ``make_dark_block``) to enable the compound-
+    Poisson dark pulse contribution D~(w) = exp[mu_dark*(phi_d1(w)-1)].
     """
 
+    def __init__(self, *args, dark_ft=None, **kwargs):
+        # Must be set before super().__init__ calls _model_callables
+        self._dark_ft_opt = dark_ft
+        super().__init__(*args, **kwargs)
+
     def _model_callables(self):
-        return _ft_extra, _ser_ft_negbin_beta_ap, _count_pgf, None
+        return _ft_extra, _ser_ft_negbin_beta_ap, _count_pgf, getattr(self, "_dark_ft_opt", None)
 
     def spe_report(self, spe_args) -> dict:
         r = NegBinAPFitter.spe_report(self, spe_args)

@@ -85,7 +85,7 @@ def _bin_integrals(G_tilde, edges, freq, N, dq):
 # ==============================
 
 
-def make_binned_logl(grid, ft_extra, ser_ft, count_pgf, efficiency=None):
+def make_binned_logl(grid, ft_extra, ser_ft, count_pgf, efficiency=None, dark_ft=None):
     """Build a binned extended-Poisson log-likelihood closure.
 
     Parameters
@@ -93,11 +93,14 @@ def make_binned_logl(grid, ft_extra, ser_ft, count_pgf, efficiency=None):
     grid : FFTGrid
     ft_extra, ser_ft, count_pgf : JAX-compatible callables
     efficiency : ignored (kept for future threshold support)
+    dark_ft : optional callable(freq, dark_params, spe_params) -> D~(w)
+        When provided, G~ is multiplied by D~(w) before integration.
 
     Returns
     -------
     logl : callable
-        logl(log_A, extra, spe, lam, thres=None) -> scalar log-L.
+        logl(log_A, extra, spe, lam, dark, thres=None) -> scalar log-L.
+        ``dark`` is always required; pass an empty array when dark_ft is None.
     """
     freq = jnp.asarray(grid.freq)
     hist = jnp.asarray(grid.hist)
@@ -108,9 +111,11 @@ def make_binned_logl(grid, ft_extra, ser_ft, count_pgf, efficiency=None):
     log_C = float(grid.log_C)
     zero_edges = jnp.asarray([float(grid.xsp[0]), float(grid.bins[0])])
 
-    def logl(log_A, extra, spe, lam, thres=None):
+    def logl(log_A, extra, spe, lam, dark, thres=None):
         A = jnp.exp(log_A)
         G_tilde = _spectrum_fft(extra, spe, lam, freq, ft_extra, ser_ft, count_pgf)
+        if dark_ft is not None:
+            G_tilde = G_tilde * dark_ft(freq, dark, spe)
 
         bin_int = _bin_integrals(G_tilde, edges, freq, N, dq)
         y_est = jnp.maximum(A * bin_int, 1e-32)
@@ -163,7 +168,7 @@ def _density_at_q(G_tilde, Q_raw, N, dq):
 #     return jnp.log(jnp.maximum(G_val, 1e-32))
 
 
-def make_unbinned_logl(Q_raw, grid, ft_extra, ser_ft, count_pgf):
+def make_unbinned_logl(Q_raw, grid, ft_extra, ser_ft, count_pgf, dark_ft=None):
     """Build an unbinned extended-Poisson log-likelihood closure.
 
     G(q) is evaluated at each raw charge value via NUFFT (type-2:
@@ -183,11 +188,13 @@ def make_unbinned_logl(Q_raw, grid, ft_extra, ser_ft, count_pgf):
         FFT grid built from the data range; hist/bins unused here.
     ft_extra, ser_ft, count_pgf : JAX callables
         Same model pieces as for make_binned_logl.
+    dark_ft : optional callable(freq, dark_params, spe_params) -> D~(w)
 
     Returns
     -------
     logl : callable
-        logl(log_A, extra, spe, lam, thres=None) -> scalar.
+        logl(log_A, extra, spe, lam, dark, thres=None) -> scalar.
+        ``dark`` is always required; pass an empty array when dark_ft is None.
     """
     freq = jnp.asarray(grid.freq)
     dq = float(grid.xsp_width)
@@ -195,9 +202,11 @@ def make_unbinned_logl(Q_raw, grid, ft_extra, ser_ft, count_pgf):
     N_obs = int(Q_raw.shape[0])
     Q = jnp.asarray(Q_raw, dtype=jnp.float32)
 
-    def logl(log_A, extra, spe, lam, thres=None):
+    def logl(log_A, extra, spe, lam, dark, thres=None):
         A = jnp.exp(log_A)
         G_tilde = _spectrum_fft(extra, spe, lam, freq, ft_extra, ser_ft, count_pgf)
+        if dark_ft is not None:
+            G_tilde = G_tilde * dark_ft(freq, dark, spe)
         G_vals = _density_at_q(G_tilde, Q, N, dq)
         p_total = jnp.real(G_tilde[0])
         return N_obs * jnp.log(A) + jnp.sum(jnp.log(G_vals)) - A * p_total

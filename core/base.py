@@ -114,6 +114,7 @@ class SpectrumFitter:
         dq=None,
         extra_block: ParamBlock = None,
         spe_block: ParamBlock = None,
+        dark_block: ParamBlock = None,
         lam_init: float = None,
         lam_bounds=(1e-6, 1e2),
         lam_dc: float = 0.0,
@@ -151,6 +152,7 @@ class SpectrumFitter:
         # ========================
         self.extra_block = extra_block or self._default_extra_block()
         self.spe_block = spe_block or self._default_spe_block()
+        self.dark_block = dark_block  # None when DCR is disabled
 
         log_A_init = log(_A)
         init_parts = [
@@ -165,32 +167,43 @@ class SpectrumFitter:
             list(self.spe_block.bounds),
             [tuple(lam_bounds)],
         ]
-        self.init = np.concatenate(init_parts)
-        self.bounds = sum(bounds_parts, [])
 
         n_extra = len(self.extra_block.init)
         n_spe = len(self.spe_block.init)
+        lam_offset = 1 + n_extra + n_spe
         self.layout = {
             "log_A": slice(0, 1),
             "extra": slice(1, 1 + n_extra),
-            "spe": slice(1 + n_extra, 1 + n_extra + n_spe),
-            "lam": slice(1 + n_extra + n_spe, 2 + n_extra + n_spe),
+            "spe": slice(1 + n_extra, lam_offset),
+            "lam": slice(lam_offset, lam_offset + 1),
         }
+
+        if dark_block is not None:
+            n_dark = len(dark_block.init)
+            dark_offset = lam_offset + 1
+            self.layout["dark"] = slice(dark_offset, dark_offset + n_dark)
+            init_parts.append(np.asarray(dark_block.init, dtype=float))
+            bounds_parts.append(list(dark_block.bounds))
+
+        self.init = np.concatenate(init_parts)
+        self.bounds = sum(bounds_parts, [])
         self.dof = len(self.init)
         self.param_names = (
             ["log_A"]
             + list(self.extra_block.names)
             + list(self.spe_block.names)
             + ["lam"]
+            + (list(dark_block.names) if dark_block is not None else [])
         )
 
         # ==================
         #     Likelihood
         # ==================
-        ft_extra, ser_ft, count_pgf, _ = self._model_callables()
+        ft_extra, ser_ft, count_pgf, dark_ft = self._model_callables()
         self._ft_extra = ft_extra
         self._ser_ft = ser_ft
         self._count_pgf = count_pgf
+        self._dark_ft = dark_ft  # None unless subclass provides it with dark_block
 
         if mode == "unbinned":
             self._logl_raw = make_unbinned_logl(
@@ -199,9 +212,12 @@ class SpectrumFitter:
                 ft_extra,
                 ser_ft,
                 count_pgf,
+                dark_ft=dark_ft,
             )
         else:
-            self._logl_raw = make_binned_logl(self.grid, ft_extra, ser_ft, count_pgf)
+            self._logl_raw = make_binned_logl(
+                self.grid, ft_extra, ser_ft, count_pgf, dark_ft=dark_ft
+            )
 
         self._logl_jit = jax.jit(self._logl_from_theta)
         self._grad_jit = jax.jit(jax.grad(self._logl_from_theta))
@@ -219,7 +235,11 @@ class SpectrumFitter:
 
     def _logl_from_theta(self, theta):
         log_A, extra, spe, lam = self._unpack(theta)
-        return self._logl_raw(log_A, extra, spe, lam)
+        if "dark" in self.layout:
+            dark = theta[self.layout["dark"]]
+        else:
+            dark = jnp.empty(0, dtype=theta.dtype)
+        return self._logl_raw(log_A, extra, spe, lam, dark)
 
     def logl(self, theta):
         return float(self._logl_jit(jnp.asarray(theta, dtype=jnp.float64)))
@@ -233,8 +253,8 @@ class SpectrumFitter:
             theta0 = self.init.copy()
         theta0 = np.asarray(theta0, dtype=np.float64)
 
-        self._logl_jit(jnp.asarray(theta0))
-        self._grad_jit(jnp.asarray(theta0))
+        self._logl_jit(jnp.asarray(theta0, dtype=jnp.float64))
+        self._grad_jit(jnp.asarray(theta0, dtype=jnp.float64))
 
         def neg_logl(x):
             return -float(self._logl_jit(jnp.asarray(x, dtype=jnp.float64)))
@@ -279,9 +299,10 @@ class SpectrumFitter:
     # ==============================
 
     def _G_tilde(self, theta):
-        """Compute G_tilde from a theta array (JAX or numpy)."""
-        _, extra, spe, lam = self._unpack(jnp.asarray(theta))
-        return _spectrum_fft(
+        """Compute G_tilde including the optional dark-count factor."""
+        t = jnp.asarray(theta)
+        _, extra, spe, lam = self._unpack(t)
+        G = _spectrum_fft(
             extra,
             spe,
             lam,
@@ -290,6 +311,10 @@ class SpectrumFitter:
             self._ser_ft,
             self._count_pgf,
         )
+        if self._dark_ft is not None and "dark" in self.layout:
+            dark = t[self.layout["dark"]]
+            G = G * self._dark_ft(jnp.asarray(self.grid.freq), dark, spe)
+        return G
 
     def estimate_bin_counts(self, theta):
         """Expected counts per bin via analytic Fourier bin integration."""
