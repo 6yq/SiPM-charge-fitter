@@ -35,7 +35,7 @@ def make_figure(n_comps=4):
     """Three-panel figure: main / residual / PE-legend row."""
     n_leg_rows = (n_comps + 2) // 3
     leg_ratio = n_leg_rows * 0.06
-    main_ratio, resid_ratio = 0.85, 0.15
+    main_ratio, resid_ratio = 0.8, 0.2
     fig_height = 6 + n_leg_rows * 0.35
 
     fig = plt.figure(figsize=(plt.rcParams["figure.figsize"][0], fig_height))
@@ -161,9 +161,7 @@ def plot_histogram_with_fit(
         exp_ = int(np.floor(np.log10(occ)))
         mu = -math.log1p(-occ)
         mu_std = occ_std / (1.0 - occ)
-        occ_str = (
-            rf"({mu/10**exp_:.3f}\pm{mu_std/10**exp_:.3f})\times10^{{{exp_}}}"
-        )
+        occ_str = rf"({mu/10**exp_:.3f}\pm{mu_std/10**exp_:.3f})\times10^{{{exp_}}}"
     elif occ is not None:
         mu = -math.log1p(-occ)
         mu_std = occ_std / (1.0 - occ)
@@ -209,7 +207,10 @@ def plot_histogram_with_fit(
         if extra_info is not None:
             # Parameter details shown in annotation box; axvline gets no legend entry.
             ax_main.axvline(
-                gm + (ped_mean or 0), color="gray", linestyle="--", alpha=0.5,
+                gm + (ped_mean or 0),
+                color="gray",
+                linestyle="--",
+                alpha=0.5,
                 label="_nolegend_",
             )
         else:
@@ -272,7 +273,8 @@ def plot_histogram_with_fit(
             leg_labels.append(info_line)
 
     ax_main.legend(
-        leg_handles, leg_labels,
+        leg_handles,
+        leg_labels,
         frameon=False,
         loc="upper right",
         bbox_to_anchor=(0.98, 0.98),
