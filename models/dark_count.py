@@ -9,7 +9,7 @@ charge CF computed by Gauss-Legendre quadrature over the integration window.
 
 With SPE fluctuations ignored (deterministic unit charge):
 
-    phi_d1(w) = [1/(T+t0)] * integral_{-t0}^{T} exp(i*w*G*a(s)) ds
+    phi_d1(w) = [1/(T+t0)] * integral_{-t0}^{T} exp(-i*w*G*a(s)) ds
 
 where a(s) is the fractional recovered charge at time s:
 
@@ -75,8 +75,8 @@ def make_dark_ft(
         spe_sigma = jnp.exp(spe_params[0])
         spe_mean = spe_sigma + jnp.exp(spe_params[1])
         # phi_d1(w) via quadrature over fractional-charge knots a_all
-        # phase[j, k] = exp(i * freq[j] * G* * a_all[k])
-        phase = jnp.exp(1j * jnp.outer(freq, a_all) * spe_mean)   # (N, 2*n_quad)
+        # phase[j, k] = exp(-i * freq[j] * G* * a_all[k])
+        phase = jnp.exp(-1j * jnp.outer(freq, a_all) * spe_mean)  # (N, 2*n_quad)
         phi_d1 = jnp.sum(phase * w_all, axis=-1) / norm            # (N,)
         return jnp.exp(mu_dark * (phi_d1 - 1.0))
 
