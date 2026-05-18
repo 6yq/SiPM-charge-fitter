@@ -144,6 +144,7 @@ def plot_histogram_with_fit(
     ax_resid=None,
     ax_leg=None,
     fig=None,
+    extra_info=None,
 ):
     if ax_main is None:
         fig, ax_main = plt.subplots()
@@ -205,23 +206,30 @@ def plot_histogram_with_fit(
     # ==============================
 
     if gm is not None:
-        g_line = (
-            f"$G={gm:.2f}\\pm{gm_std:.2f}$" if gm_std is not None else f"G={gm:.2f}"
-        )
-        sigma_line = (
-            f"$\\sigma={spe_sigma:.2f}\\pm{spe_sigma_std:.2f}$"
-            if spe_sigma is not None
-            else ""
-        )
-        eta_line = (
-            f"$\\eta={spe_res:.2f}\\pm{spe_res_std:.2f}\%$"
-            if spe_res is not None
-            else ""
-        )
-        gm_label = "\n".join(filter(None, [g_line, sigma_line, eta_line]))
-        ax_main.axvline(
-            gm + ped_mean, color="gray", linestyle="--", alpha=0.7, label=gm_label
-        )
+        if extra_info is not None:
+            # Parameter details shown in annotation box; axvline gets no legend entry.
+            ax_main.axvline(
+                gm + (ped_mean or 0), color="gray", linestyle="--", alpha=0.5,
+                label="_nolegend_",
+            )
+        else:
+            g_line = (
+                f"$G={gm:.2f}\\pm{gm_std:.2f}$" if gm_std is not None else f"G={gm:.2f}"
+            )
+            sigma_line = (
+                f"$\\sigma={spe_sigma:.2f}\\pm{spe_sigma_std:.2f}$"
+                if spe_sigma is not None
+                else ""
+            )
+            eta_line = (
+                f"$\\eta={spe_res:.2f}\\pm{spe_res_std:.2f}\%$"
+                if spe_res is not None
+                else ""
+            )
+            gm_label = "\n".join(filter(None, [g_line, sigma_line, eta_line]))
+            ax_main.axvline(
+                gm + ped_mean, color="gray", linestyle="--", alpha=0.7, label=gm_label
+            )
 
     # ==============================
     #     Per-PE components (on bin_centers grid)
@@ -243,7 +251,6 @@ def plot_histogram_with_fit(
     if logscale:
         ax_main.set_yscale("log")
 
-    ax_main.grid(True, which="both", linestyle="--", alpha=0.3)
     ax_main.set_ylabel("Entries")
     if ch is not None:
         ax_main.set_title(f"channel id {ch}")
@@ -253,7 +260,19 @@ def plot_histogram_with_fit(
         FontProperties(size=plt.rcParams["legend.fontsize"]).get_size_in_points()
         * fs_scale
     )
+
+    # Collect auto-legend handles (filters _nolegend_ entries), then append
+    # extra_info lines as text-only entries directly below the chi-sq entry.
+    from matplotlib.lines import Line2D as _Line2D
+
+    leg_handles, leg_labels = ax_main.get_legend_handles_labels()
+    if extra_info is not None:
+        for info_line in extra_info:
+            leg_handles.append(_Line2D([], [], linestyle="none", color="none"))
+            leg_labels.append(info_line)
+
     ax_main.legend(
+        leg_handles, leg_labels,
         frameon=False,
         loc="upper right",
         bbox_to_anchor=(0.98, 0.98),
