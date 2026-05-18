@@ -318,11 +318,15 @@ class SpectrumFitter:
 
     def estimate_bin_counts(self, theta):
         """Expected counts per bin via analytic Fourier bin integration."""
+        return self.estimate_bin_counts_at(theta, self.grid.bins)
+
+    def estimate_bin_counts_at(self, theta, bins):
+        """Expected counts per bin for arbitrary bin edges."""
         log_A, *_ = self._unpack(jnp.asarray(theta))
         G_tilde = self._G_tilde(theta)
         bin_int = _bin_integrals(
             G_tilde,
-            jnp.asarray(self.grid.bins),
+            jnp.asarray(bins),
             jnp.asarray(self.grid.freq),
             len(self.grid.xsp),
             float(self.grid.xsp_width),
@@ -338,6 +342,10 @@ class SpectrumFitter:
 
     def estimate_component_counts(self, theta, n):
         """Expected counts for exactly n PE per bin."""
+        return self.estimate_component_counts_at(theta, n, self.grid.bins)
+
+    def estimate_component_counts_at(self, theta, n, bins):
+        """Expected counts for exactly n PE over arbitrary bin edges."""
         n_pgf = self._single_n_pgf(n)
         log_A, extra, spe, lam = self._unpack(jnp.asarray(theta))
         G_tilde = _spectrum_fft(
@@ -351,7 +359,7 @@ class SpectrumFitter:
         )
         bin_int = _bin_integrals(
             G_tilde,
-            jnp.asarray(self.grid.bins),
+            jnp.asarray(bins),
             jnp.asarray(self.grid.freq),
             len(self.grid.xsp),
             float(self.grid.xsp_width),
