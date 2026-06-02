@@ -429,14 +429,13 @@ class NegBinBetaAPFitter(NegBinAPFitter):
 
     def spe_print(self, spe_args):
         r = self.spe_report(spe_args)
+        mean_fraction = r["ap_charge_mean"] / r["spe_mean"]
         print(f"  spe    {'spe_mean':20s} = {r['spe_mean']:.6g}", flush=True)
         print(f"  spe    {'spe_sigma':20s} = {r['spe_sigma']:.6g}", flush=True)
         print(f"  spe    {'xi':20s} = {r['xi']:.6g}", flush=True)
         print(f"  spe    {'rho':20s} = {r['rho']:.6g}", flush=True)
-        print(f"  spe    {'beta=<Q_AP>/((1-rho)*G)':20s} = {r['beta']:.6g}", flush=True)
-        print(f"  spe    {'<Q_AP>':20s} = {r['ap_charge_mean']:.6g}", flush=True)
+        print(f"  spe    {'<Q_AP>/G':20s} = {mean_fraction:.6g}", flush=True)
         print(f"  spe    {'Beta shape b':20s} = {r['beta_shape_b']:.6g}", flush=True)
-        print(f"  spe    {'alpha=rho*beta':20s} = {r['alpha']:.6g}", flush=True)
 
 
 class NegBinExpAPFitter(NegBinBetaAPFitter):

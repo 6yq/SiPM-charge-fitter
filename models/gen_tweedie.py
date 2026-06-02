@@ -83,6 +83,10 @@ def _count_pgf(s, lam, spe):
     xi_safe = jnp.where(jnp.abs(xi) < 1e-12, 1e-12, xi)
     arg = -xi_safe * s * jnp.exp(-xi_safe)
     T = -lambert_w0(arg) / xi_safe
+    # Guard against NaN from quadrature noise at high frequencies pushing
+    # the Lambert-W argument outside its numerically stable domain.
+    # Fall back to T(s)=s, the Poisson (xi->0) limit.
+    T = jnp.where(jnp.isfinite(T), T, s)
     return jnp.exp(lam * (T - 1.0))
 
 
