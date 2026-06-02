@@ -16,26 +16,19 @@ Aggregated over n avalanches, M_n | N=n ~ NegBin(n, 1-rho), with
 
 Parameterisation of afterpulse parameters
 ------------------------------------------
-The two optimised parameters are:
+The two optimised AP parameters are:
 
-  log_rho     log(rho),                  rho  = exp(log_rho)      in (0, 1)
-  logit_beta  logit(beta),               beta = sigmoid(logit_beta) in (0, 1)
+  log_rho    log(rho),    rho   = exp(log_rho)   in (0, 1)
+  log_b_ap   log(b_ap),   b_ap  = exp(log_b_ap)  in (0, inf)
 
-where beta = Q_ap / ((1 - rho) * G) and G = spe_mean, so that
+where b_ap is the second shape parameter of Beta(2, b_ap), so that each
+single AP charge satisfies
 
-  Q_ap = beta * (1 - rho) * G   in  (0, (1-rho)*G)  ⊂  (0, G)
+  Q_ap = G * X,   X ~ Beta(2, b_ap),   E[X] = 2 / (2 + b_ap)
 
-Physical interpretation:
-  - rho   controls the *mean* AP contribution: E ~ n * beta * G * rho
-  - beta  controls the *spread*: Var ~ n * beta^2 * G^2 * rho
-  These are approximately orthogonal in terms of the moments they govern.
-
-  alpha = rho * beta = rho * Q_ap / ((1-rho) * G)  is a useful summary:
-  it equals E[M_n * Q_ap | N=n] / (n * G * (1-rho)), i.e. the mean AP
-  charge as a fraction of (1-rho)*G.
-
-Using log_rho (rather than logit) keeps the gradient ~rho near zero,
-which is more uniform for the expected regime rho ~ 0.1-1%.
+The two parameters are independent:
+  - rho    controls AP *count*:   E[M | N=n] = n * rho / (1-rho)
+  - b_ap   controls AP *charge*:  E[Q_ap] = G * 2/(2+b_ap)
 
 Full spe_block layout (indices 0-4)
 -------------------------------------
@@ -43,7 +36,7 @@ Full spe_block layout (indices 0-4)
   1  b_logDiff    log(mu_SPE - sigma_SPE)
   2  xi           Gen-Poisson dispersion
   3  log_rho      log(rho),   rho in (exp(-10), exp(-0.1)) ~ (4.5e-5, 0.9)
-  4  logit_beta   logit(beta), beta in (sigmoid(-10), sigmoid(10)) ~ (5e-5, 1-5e-5)
+  4  log_b_ap     log(b_ap),  b_ap > 0;  mean AP charge = G*2/(2+b_ap)
 """
 
 from __future__ import annotations
@@ -83,13 +76,13 @@ def _ser_ft_negbin_ap(freq, spe):
     Parameters
     ----------
     spe : array, length 5
-        [a_logSigma, b_logDiff, xi, log_rho, logit_beta]
+        [a_logSigma, b_logDiff, xi, log_rho, log_b_ap]
 
     Derived quantities
     ------------------
-    rho  = exp(log_rho)                       in (0, 1)
-    beta = sigmoid(logit_beta)                in (0, 1)
-    Q_ap = beta * (1 - rho) * spe_mean        in (0, (1-rho)*G) ⊂ (0, G)
+    rho  = exp(log_rho)          in (0, 1)
+    b_ap = exp(log_b_ap)         in (0, inf)
+    Q_ap = 2/(2+b_ap) * spe_mean  E[Q_ap], independent of rho
     """
     a, b = spe[0], spe[1]
     spe_mean, spe_sigma = spe_from_reparam(a, b)
@@ -98,8 +91,8 @@ def _ser_ft_negbin_ap(freq, spe):
     f_tilde = (1.0 + 1j * theta_gamma * freq) ** (-alpha_gamma)
 
     rho = jnp.exp(spe[3])
-    beta = jax.nn.sigmoid(spe[4])
-    Q_ap = beta * (1.0 - rho) * spe_mean
+    b_ap = jnp.exp(spe[4])
+    Q_ap = 2.0 / (2.0 + b_ap) * spe_mean  # E[Q_ap] = G * 2/(2+b_ap)
 
     ap_phase = jnp.exp(-1j * freq * Q_ap)
     ap_factor = (1.0 - rho) / (1.0 - rho * ap_phase)
@@ -160,15 +153,13 @@ def _ser_ft_negbin_beta_ap(freq, spe):
 
         AP_factor(w) = (1-rho) / (1 - rho * phi_Beta(w)).
 
-    The one-AP charge is Q = G X with X ~ Beta(2, b_ap).  We preserve the
-    existing mean-charge parameterisation by setting
+    The one-AP charge is Q = G X with X ~ Beta(2, b_ap).
 
-        E[Q] = beta * (1-rho) * G,
-        E[X] = beta * (1-rho),
-        b_ap = 2 * (1 - E[X]) / E[X].
+        E[X] = 2 / (2 + b_ap),  independent of rho.
+        b_ap = exp(spe[4]).
 
-    Thus rho controls AP multiplicity while beta controls the mean charge of
-    each AP, not another count-like degree of freedom.
+    rho controls AP multiplicity; b_ap controls mean AP charge.
+    The two parameters are fully independent.
     """
     a, b = spe[0], spe[1]
     spe_mean, spe_sigma = spe_from_reparam(a, b)
@@ -177,8 +168,8 @@ def _ser_ft_negbin_beta_ap(freq, spe):
     f_tilde = (1.0 + 1j * theta_gamma * freq) ** (-alpha_gamma)
 
     rho = jnp.exp(spe[3])
-    beta = jax.nn.sigmoid(spe[4])
-    mean_fraction = beta * (1.0 - rho)
+    b_ap = jnp.exp(spe[4])
+    mean_fraction = 2.0 / (2.0 + b_ap)  # E[X] for Beta(2, b_ap), independent of rho
     phi_beta = _beta2_charge_cf(freq, spe_mean, mean_fraction)
     ap_factor = (1.0 - rho) / (1.0 - rho * phi_beta)
 
@@ -209,7 +200,7 @@ class NegBinAPFitter(GenTweedieFitter):
     Inherits all likelihood, optimiser, and plotting machinery from
     GenTweedieFitter.  Only _model_callables and the spe_block differ.
 
-    See module docstring for the (log_rho, logit_beta) parameterisation.
+    See module docstring for the (log_rho, log_b_ap) parameterisation.
     """
 
     def _model_callables(self):
@@ -226,18 +217,20 @@ class NegBinAPFitter(GenTweedieFitter):
     def _default_spe_block(self):
         a0, b0 = reparam_from_spe(_DEFAULT_SPE_MEAN, _DEFAULT_SPE_SIGMA)
         log_rho0 = float(np.log(_DEFAULT_RHO))
-        beta_0 = _DEFAULT_Q_AP / ((1.0 - _DEFAULT_RHO) * _DEFAULT_SPE_MEAN)
-        logit_beta0 = float(np.log(beta_0 / (1.0 - beta_0)))
+        # b_ap from default Q_ap: E[Q_ap]=G*2/(2+b) -> b=2*(G/Q_ap - 1)
+        mean_frac0 = _DEFAULT_Q_AP / _DEFAULT_SPE_MEAN
+        b_ap0 = 2.0 * (1.0 - mean_frac0) / mean_frac0
+        log_b_ap0 = float(np.log(b_ap0))
         return ParamBlock(
             name="spe",
-            names=["a_logSigma", "b_logDiff", "xi", "log_rho", "logit_beta"],
-            init=np.array([a0, b0, _DEFAULT_XI, log_rho0, logit_beta0], dtype=float),
+            names=["a_logSigma", "b_logDiff", "xi", "log_rho", "log_b_ap"],
+            init=np.array([a0, b0, _DEFAULT_XI, log_rho0, log_b_ap0], dtype=float),
             bounds=[
                 (log(10.0), log(1e5)),  # a_logSigma
                 (log(10.0), log(1e5)),  # b_logDiff
-                (1e-4, 0.99),  # xi
-                (-10.0, -1.61),  # log_rho:    rho in (4.5e-5, 0.2)
-                (-10.0, 10.0),  # logit_beta: beta in (5e-5, 1-5e-5)
+                (1e-4, 0.99),           # xi
+                (-10.0, -1.61),         # log_rho: rho in (4.5e-5, 0.2)
+                (-5.0, 7.0),            # log_b_ap: b_ap in (0.007, 1097)
             ],
         )
 
@@ -345,9 +338,9 @@ class NegBinAPFitter(GenTweedieFitter):
         sigma = float(np.exp(a))
         mean = sigma + float(np.exp(b))
         rho = float(np.exp(float(spe_args[3])))
-        beta = float(jax.nn.sigmoid(float(spe_args[4])))
-        Q_ap = beta * (1.0 - rho) * mean
-        mean_ap = rho / (1.0 - rho)  # E[A_j] for Geom_0(rho)
+        b_ap = float(np.exp(float(spe_args[4])))
+        Q_ap = 2.0 / (2.0 + b_ap) * mean  # E[Q_ap] = G * 2/(2+b_ap)
+        mean_ap = rho / (1.0 - rho)       # E[A_j] for Geom_0(rho)
         if kind == "gm":
             return mean + mean_ap * Q_ap
         if kind == "prompt":
@@ -359,19 +352,19 @@ class NegBinAPFitter(GenTweedieFitter):
         sigma = float(np.exp(a))
         mean = sigma + float(np.exp(b))
         rho = float(np.exp(float(spe_args[3])))
-        beta = float(jax.nn.sigmoid(float(spe_args[4])))
-        Q_ap = beta * (1.0 - rho) * mean
+        b_ap = float(np.exp(float(spe_args[4])))
+        mean_fraction = 2.0 / (2.0 + b_ap)
+        Q_ap = mean_fraction * mean
         mean_ap = rho / (1.0 - rho)
-        alpha = rho * beta
         return {
             "spe_mean": mean,
             "spe_sigma": sigma,
             "spe_res": sigma / mean,
             "xi": xi,
             "rho": rho,
-            "beta": beta,
+            "b_ap": b_ap,
+            "mean_fraction": mean_fraction,
             "Q_ap": Q_ap,
-            "alpha": alpha,
             "mean_ap": mean_ap,
             "total_mean": mean + mean_ap * Q_ap,
         }
@@ -382,9 +375,9 @@ class NegBinAPFitter(GenTweedieFitter):
         print(f"  spe    {'spe_sigma':20s} = {r['spe_sigma']:.6g}", flush=True)
         print(f"  spe    {'xi':20s} = {r['xi']:.6g}", flush=True)
         print(f"  spe    {'rho':20s} = {r['rho']:.6g}", flush=True)
-        print(f"  spe    {'beta=Q_ap/((1-rho)*G)':20s} = {r['beta']:.6g}", flush=True)
+        print(f"  spe    {'b_ap':20s} = {r['b_ap']:.6g}", flush=True)
+        print(f"  spe    {'<Q_ap>/G':20s} = {r['mean_fraction']:.6g}", flush=True)
         print(f"  spe    {'Q_ap':20s} = {r['Q_ap']:.6g}", flush=True)
-        print(f"  spe    {'alpha=rho*beta':20s} = {r['alpha']:.6g}", flush=True)
 
 
 # ==============================
@@ -395,14 +388,11 @@ class NegBinAPFitter(GenTweedieFitter):
 class NegBinBetaAPFitter(NegBinAPFitter):
     """Gen-Tweedie spectrum with NegBin AP counts and Beta(2,b) AP charge.
 
-    Compared with the fixed-Q_ap model, this smooths the AP charge contribution
-    across the 0--1 PE interval while preserving the same first moment:
+    AP count per avalanche: A ~ Geom_0(rho).
+    AP charge per pulse:    Q = G * X,  X ~ Beta(2, b_ap).
+    E[Q_ap] = G * 2/(2+b_ap),  independent of rho.
 
-        E[Q_AP] = beta * (1-rho) * G.
-
-    The Beta shape a=2 is the early-recovery suppression f(Q) ~ Q.  The fitted
-    mean fixes b, so the model adds no extra weakly identified AP parameter on
-    top of rho and beta.
+    spe[4] = log_b_ap.  b_ap is the second Beta shape parameter.
 
     Optional dark-count term
     ------------------------
@@ -420,22 +410,20 @@ class NegBinBetaAPFitter(NegBinAPFitter):
         return _ft_extra, _ser_ft_negbin_beta_ap, _count_pgf, getattr(self, "_dark_ft_opt", None)
 
     def spe_report(self, spe_args) -> dict:
+        # NegBinAPFitter.spe_report already uses log_b_ap correctly; Beta model
+        # adds ap_charge_mean as alias for Q_ap (same formula, distributed charge).
         r = NegBinAPFitter.spe_report(self, spe_args)
-        ap_charge_mean = r.pop("Q_ap")
-        mean_fraction = ap_charge_mean / r["spe_mean"]
-        r["ap_charge_mean"] = ap_charge_mean
-        r["beta_shape_b"] = 2.0 * (1.0 - mean_fraction) / mean_fraction
+        r["ap_charge_mean"] = r["Q_ap"]
         return r
 
     def spe_print(self, spe_args):
         r = self.spe_report(spe_args)
-        mean_fraction = r["ap_charge_mean"] / r["spe_mean"]
         print(f"  spe    {'spe_mean':20s} = {r['spe_mean']:.6g}", flush=True)
         print(f"  spe    {'spe_sigma':20s} = {r['spe_sigma']:.6g}", flush=True)
         print(f"  spe    {'xi':20s} = {r['xi']:.6g}", flush=True)
         print(f"  spe    {'rho':20s} = {r['rho']:.6g}", flush=True)
-        print(f"  spe    {'<Q_AP>/G':20s} = {mean_fraction:.6g}", flush=True)
-        print(f"  spe    {'Beta shape b':20s} = {r['beta_shape_b']:.6g}", flush=True)
+        print(f"  spe    {'b_ap':20s} = {r['b_ap']:.6g}", flush=True)
+        print(f"  spe    {'<Q_ap>/G':20s} = {r['mean_fraction']:.6g}", flush=True)
 
 
 class NegBinExpAPFitter(NegBinBetaAPFitter):
