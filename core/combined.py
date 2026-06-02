@@ -340,7 +340,7 @@ class CombinedFitter:
         H = np.asarray(
             jax.hessian(_logl_jit_combined)(jnp.asarray(theta_hat, dtype=jnp.float64))
         )
-        cov = -np.linalg.inv(H)
+        cov = -np.linalg.pinv(H, hermitian=True)
         diag = np.diag(cov)
         diag = np.where(diag > 0, diag, np.nan)
         return np.sqrt(diag)
