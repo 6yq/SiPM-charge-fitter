@@ -142,3 +142,30 @@ def test_herm_w_freq_half_correctness():
     assert freq_half_odd[0] == 0.0  # DC
     # For odd N, last half-grid bin is NOT self-conjugate
     assert abs(freq_half_odd[-1] + freq_odd[-(N_half_odd - 1)]) < 1e-10
+
+
+def test_f64_dtype_matches_f32_within_tol():
+    """complex128 make_lam_logl matches the complex64 build within f32 tol."""
+    import jax.numpy as jnp
+    N = 12
+    pc32, pe32, lg32, freq_full, dq, L = _build_pipelines(N)  # default complex64
+    from fitter.core.likelihood import make_lam_logl as _mll
+    pc64, pe64, lg64 = _mll(
+        freq_full, dq, N, _ft_extra, _ser_ft_negbin_beta_ap, _count_pgf,
+        dtype=jnp.complex128,
+    )
+    rng = np.random.default_rng(3)
+    extra_all, spe_all = _make_fake_data(N_CH, rng)
+    s32, g032, u32 = pc32(jnp.asarray(extra_all), jnp.asarray(spe_all))
+    s64, g064, u64 = pc64(jnp.asarray(extra_all), jnp.asarray(spe_all))
+    n_fired = 3
+    Q = jnp.asarray(rng.uniform(-200, 5000, size=n_fired))
+    fired_idx = jnp.asarray(rng.choice(N_CH, size=n_fired, replace=True), dtype=jnp.int32)
+    lam = jnp.asarray(rng.uniform(0.1, 2.0, size=n_fired))
+    u_s32, gp32 = pe32(Q, fired_idx, g032, u32)
+    u_s64, gp64 = pe64(Q, fired_idx, g064, u64)
+    l32, gd32 = lg32(lam, u_s32, gp32)
+    l64, gd64 = lg64(lam, u_s64, gp64)
+    assert jnp.allclose(l32, l64, rtol=1e-4, atol=1e-5)
+    assert jnp.allclose(gd32, gd64, rtol=1e-4, atol=1e-5)
+    assert u_s64.dtype == jnp.complex128

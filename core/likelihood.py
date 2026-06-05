@@ -266,7 +266,7 @@ def _count_u_from_pgf0(s, spe, count_pgf):
 # ==================================
 
 
-def make_lam_logl(freq, dq, N, ft_extra, ser_ft, count_pgf):
+def make_lam_logl(freq, dq, N, ft_extra, ser_ft, count_pgf, dtype=jnp.complex64):
     """Factory for the per-event reconstruction likelihood.
 
     Only fired channels are passed to this function — unfired channels
@@ -316,6 +316,7 @@ def make_lam_logl(freq, dq, N, ft_extra, ser_ft, count_pgf):
     herm_w = _w
 
     L = float(N * dq)
+    rdtype = jnp.float64 if dtype == jnp.complex128 else jnp.float32
 
     def precompute_channels(extra, spe):
         """Precompute channel-wise arrays independent of event and lam.
@@ -339,7 +340,7 @@ def make_lam_logl(freq, dq, N, ft_extra, ser_ft, count_pgf):
         g0_sel = g0_all[fired_idx]  # (n_fired, N_half)
         u_sel = u_all[fired_idx]  # (n_fired, N_half)
         phase = jnp.exp(1j * jnp.outer(Q.astype(jnp.float64), freq_j))  # (n_fired, N_half)
-        return u_sel.astype(jnp.complex64), (g0_sel * phase).astype(jnp.complex64)
+        return u_sel.astype(dtype), (g0_sel * phase).astype(dtype)
 
     def logl_and_grad_fn(lam, u_sel, g0_phase):
         """Analytic logl and gradient w.r.t. lam for fired channels.
@@ -356,10 +357,10 @@ def make_lam_logl(freq, dq, N, ft_extra, ser_ft, count_pgf):
         giving ~1.5-2x speedup on the memory-bandwidth-bound exp+sum.
         The Hermitian-reduction halves it again.
         """
-        lam32 = lam.astype(jnp.float32)
-        u32 = u_sel.astype(jnp.complex64)
-        g32 = g0_phase.astype(jnp.complex64)
-        w32 = herm_w.astype(jnp.float32)
+        lam32 = lam.astype(rdtype)
+        u32 = u_sel.astype(dtype)
+        g32 = g0_phase.astype(dtype)
+        w32 = herm_w.astype(rdtype)
 
         expo = jnp.exp(lam32[:, None] * u32)  # (n_fired, N_half) complex64
         wt = expo * g32  # (n_fired, N_half) complex64
