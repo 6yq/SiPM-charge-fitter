@@ -306,16 +306,28 @@ def make_lam_logl(freq, dq, N, ft_extra, ser_ft, count_pgf):
         lam: (n_fired,), outputs both shape (n_fired,).
         Computes logl and d(logl)/d(lam_j) analytically in one pass.
     """
-    freq_j = jnp.asarray(freq)
+    N_half = N // 2 + 1
+    freq_j = jnp.asarray(freq[:N_half])
+    # Hermitian weight: DC = 1, interior = 2, Nyquist = 1 if N even else 2
+    _w = jnp.ones(N_half, dtype=jnp.float64)
+    _w = _w.at[1:].set(2.0)
+    if N % 2 == 0:
+        _w = _w.at[-1].set(1.0)
+    herm_w = _w
+
     L = float(N * dq)
 
     def precompute_channels(extra, spe):
-        """Precompute channel-wise arrays independent of event and lam."""
-        s_all = jax.vmap(lambda spe_j: ser_ft(freq_j, spe_j))(spe)  # (n_ch, N)
-        g0_all = jax.vmap(lambda ex_j: ft_extra(freq_j, ex_j))(extra)  # (n_ch, N)
+        """Precompute channel-wise arrays independent of event and lam.
+
+        Evaluated on freq[:N_half] only; the Hermitian conjugate half is
+        recovered via the real-weight reduction in logl_and_grad_fn.
+        """
+        s_all = jax.vmap(lambda spe_j: ser_ft(freq_j, spe_j))(spe)  # (n_ch, N_half)
+        g0_all = jax.vmap(lambda ex_j: ft_extra(freq_j, ex_j))(extra)  # (n_ch, N_half)
         u_all = jax.vmap(lambda s_j, spe_j: _count_u_from_pgf0(s_j, spe_j, count_pgf))(
             s_all, spe
-        )  # (n_ch, N)
+        )  # (n_ch, N_half)
         return s_all, g0_all, u_all
 
     def precompute_event(Q, fired_idx, g0_all, u_all):
@@ -324,36 +336,35 @@ def make_lam_logl(freq, dq, N, ft_extra, ser_ft, count_pgf):
         The observed charge enters only through exp(+i * w * Q_j), i.e. the
         Fourier kernel used to evaluate G_j at q = Q_j.
         """
-        g0_sel = g0_all[fired_idx]  # (n_fired, N)
-        u_sel = u_all[fired_idx]  # (n_fired, N)
-        phase = jnp.exp(1j * jnp.outer(Q.astype(jnp.float64), freq_j))  # (n_fired, N)
+        g0_sel = g0_all[fired_idx]  # (n_fired, N_half)
+        u_sel = u_all[fired_idx]  # (n_fired, N_half)
+        phase = jnp.exp(1j * jnp.outer(Q.astype(jnp.float64), freq_j))  # (n_fired, N_half)
         return u_sel.astype(jnp.complex64), (g0_sel * phase).astype(jnp.complex64)
 
     def logl_and_grad_fn(lam, u_sel, g0_phase):
         """Analytic logl and gradient w.r.t. lam for fired channels.
 
-        G_j(Q_j; lam_j) = (1/L) * Re( sum_n exp(lam_j * u_jn) * g0_phase_jn )
-
-        d(log G_j)/d(lam_j) = Re( sum_n u_jn * exp(lam_j * u_jn) * g0_phase_jn )
-                               / (L * G_j)
-
-        Both numerator and denominator share the same exponential matrix, so the
-        gradient costs no extra FFT — one matrix product computes both.
+        Evaluated on the non-negative half-spectrum. The Hermitian weight
+        w[k] = 1 for DC (k=0), 2 for conjugate-pair interior bins, and
+        1 for the self-conjugate Nyquist bin (even N). The full-sum
+        real part is Re(Σ wt) = Σ_k w_k * Re(wt_k); same for u * wt.
 
         Notes
         -----
         Cast to f32 for the exp/sum hot path; boundary values stay f64.
         Working set halves (225 MB → 112 MB for n_fired~3400, N_FFT=2048),
         giving ~1.5-2x speedup on the memory-bandwidth-bound exp+sum.
+        The Hermitian-reduction halves it again.
         """
         lam32 = lam.astype(jnp.float32)
         u32 = u_sel.astype(jnp.complex64)
         g32 = g0_phase.astype(jnp.complex64)
+        w32 = herm_w.astype(jnp.float32)
 
-        expo = jnp.exp(lam32[:, None] * u32)  # (n_fired, N) complex64
-        wt = expo * g32  # (n_fired, N) complex64
-        G_val = jnp.real(jnp.sum(wt, axis=1)).astype(jnp.float64) / L
-        dG = jnp.real(jnp.sum(u32 * wt, axis=1)).astype(jnp.float64) / L
+        expo = jnp.exp(lam32[:, None] * u32)  # (n_fired, N_half) complex64
+        wt = expo * g32  # (n_fired, N_half) complex64
+        G_val = (w32 * jnp.real(wt)).sum(axis=1).astype(jnp.float64) / L
+        dG = (w32 * jnp.real(u32 * wt)).sum(axis=1).astype(jnp.float64) / L
         G_safe = jnp.maximum(G_val, 1e-32)
         return jnp.log(G_safe), dG / G_safe
 
