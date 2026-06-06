@@ -366,8 +366,16 @@ def make_lam_logl(freq, dq, N, ft_extra, ser_ft, count_pgf, dtype=jnp.complex64)
         wt = expo * g32  # (n_fired, N_half) complex64
         G_val = (w32 * jnp.real(wt)).sum(axis=1).astype(jnp.float64) / L
         dG = (w32 * jnp.real(u32 * wt)).sum(axis=1).astype(jnp.float64) / L
+        # f32 cannot resolve a density far below the Fourier-term scale: for a
+        # deep-tail observed Q, G_val underflows to f32 noise while dG is also
+        # noise, so dG/G_safe explodes (~1e20) and a single channel hijacks the
+        # gradient. Keep the NLL penalty (logl floored) but ZERO the gradient
+        # where G is below the f32-resolvable floor -- an unresolved channel
+        # must not drive lambda. Above the floor the analytic gradient stands.
+        G_floor = 1e-10
         G_safe = jnp.maximum(G_val, 1e-32)
-        return jnp.log(G_safe), dG / G_safe
+        grad = jnp.where(G_val > G_floor, dG / jnp.maximum(G_val, G_floor), 0.0)
+        return jnp.log(G_safe), grad
 
     precompute_channels_jit = jax.jit(precompute_channels)
     precompute_event_jit = jax.jit(precompute_event)
